@@ -1,0 +1,181 @@
+---
+title: "Timeline of Acute Restraint Stress (ARS)"
+author: "Pierre-Luc Germain"
+date: "2023-05-23"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(dev="CairoPNG")
+suppressPackageStartupMessages({
+  library(sechm)
+  library(edgeR)
+  library(stageR)
+  library(ggplot2)
+  library(cowplot)
+  library(patchwork)
+  library(clusterProfiler)
+})
+source("../functions/functions.R")
+source("../functions/clusterProfiling.R")
+th.lfc <- log2(1.3)
+```
+
+
+```{r}
+se <- readRDS("../rnaDEAs/ARS.SE.rds")
+fs <- readRDS("../extDat/TimeSeriesFST_DEA.SE.Rds")
+fs <- sechm::log2FC(fs, controls=fs$TimePoint=="0min", fromAssay="corrected", by=fs$Region, isLog=TRUE)
+fs <- fs[,fs$Region=="vHC"]
+fs$TimePoint <- gsub("1h30min","1h30",fs$TimePoint)
+fullMSE <- SEtools::mergeSEs(list(Restraint=se, Swim=fs), use.assays=c("log2FC","scaledLFC"), keepRowData=FALSE, do.scale=FALSE)
+fullMSE$TimePoint <- factor(fullMSE$TimePoint, c("0min", "45min", "1h30", "2h", "3h", "4h", "5h30", "24h"))
+metadata(fullMSE)$anno_colors <- 
+  list(TimePoint=setNames(RColorBrewer::brewer.pal(length(levels(fullMSE$TimePoint)), "YlOrRd"),
+                                                     levels(fullMSE$TimePoint)))
+
+metadata(fullMSE)$anno_colors <- list(TimePoint=setNames(RColorBrewer::brewer.pal(length(levels(fullMSE$TimePoint)), "YlOrRd"),
+                                                     levels(fullMSE$TimePoint)))
+mse <- fullMSE[,fullMSE$TimePoint %in% c("0min","45min","1h30","3h")]
+mse$TimePoint <- factor(mse$TimePoint, c("0min","45min","1h30","3h"))
+adegs <- getDEGs(getDEA(se)[c("45min","1h30","3h")], lfc.th = th.lfc)
+fs.degs <- getDEGs(getDEA(fs)[paste0("vHC_",c("45min","1h30min","3h"))], lfc.th = th.lfc)
+udegs <- union(fs.degs,adegs)
+
+h1a <- sechm(mse[,order(mse$TimePoint)], udegs, assayName="log2FC", do.scale=FALSE, row_title_gp=gpar(fontsize=11), 
+            gaps_at="Dataset",top_annotation=c("TimePoint"), row_title="Union of all DEGs", use_raster=TRUE, breaks = 0.98)
+```
+
+
+
+```{r, fig.height=3, fig.width=8}
+ann <- HeatmapAnnotation(df=as.data.frame(colData(se)[,c("TimePoint","Sex")]),
+                         col=metadata(se)$anno_colors, show_legend=c(FALSE,TRUE), show_annotation_name=FALSE)
+h0 <- sechm(se, adegs, assayName="scaledLFC", top_annotation = ann, gaps_at="TimePoint", row_title="ARS DEGs",
+            column_title_rot=90, column_title_gp=gpar(fontsize=11), row_title_gp=gpar(fontsize=12), annocol_title_side=NA, use_raster=TRUE)
+mdsp <- mdsTimePlot(se, adegs)
+
+uns <- readRDS("../rnaDEAs/all.unspliced.SE.rds")
+uns <- uns[,!grepl("CRS",uns$Experiment)]
+uns.degs <- getDEGs(getDEA(uns)[1:5], lfc.th = th.lfc)
+mdsp2 <- mdsTimePlot(uns, uns.degs)
+
+mds <- (mdsp + ggtitle("Full transcriptome")) + 
+  (mdsp2 + ggtitle("Active transcription")) + 
+  plot_layout(guides="collect") & theme(title=element_text(size=10), legend.position = "bottom")
+
+p0 <- plot_grid(grid.grabExpr(draw(h0, merge=TRUE)), mds, nrow=1, scale=0.95, rel_widths=c(3,4), labels=LETTERS[2:3])
+p0
+```
+
+```{r, fig.width=10, fig.height=4}
+d <- dplyr::bind_rows(lapply(getDEA(se)[1:5], FUN=function(x){
+  x <- x[!is.na(x$PValue),]
+  cbind(gene=row.names(x), x[,-4])
+}), .id="TimePoint")
+d$TimePoint <- factor(d$TimePoint, levels(se$TimePoint)[-1])
+d$sig <- d$FDR<0.05 & abs(d$logFC)>th.lfc
+vol <- ggplot(d, aes(logFC, -log10(FDR))) + ggrastr::geom_point_rast(size=0.5, colour="darkgrey") + 
+  geom_point(data=d[d$FDR<0.05,], size=0.5, aes(colour=sig)) + 
+  scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue")) +
+  theme_bw() + theme(legend.position = "none") + facet_wrap(~TimePoint, nrow=1) +
+  xlim(c(-2,2.5)) + scale_y_sqrt()
+
+ma <- ggplot(d, aes(logCPM, logFC)) + ggrastr::geom_point_rast(size=0.5, colour="darkgrey") + 
+  geom_point(data=d[d$FDR<0.05,], size=0.5, aes(colour=sig)) + 
+  scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue")) +
+  theme_bw() + theme(legend.position = "none") + facet_wrap(~TimePoint, nrow=1) +
+  ylim(c(-2,2.5))
+vol / ma
+```
+
+
+## FSS / ARS logFC scatters
+
+```{r, fig.width=10, fig.height=3}
+fs.deas <- getDEA(fs)
+fs.deas <- fs.deas[grep("vHC_",names(fs.deas))]
+names(fs.deas) <- gsub("vHC_|min","",names(fs.deas))
+fs.deas <- fs.deas[intersect(names(fs.deas),gsub("min","",names(getDEA(se))))]
+deas <- getDEA(se)[1:5]
+names(deas) <- gsub("min","",names(deas))
+deas <- deas[names(fs.deas)]
+d1 <- dplyr::bind_rows(lapply(deas, FUN=function(x){
+  x <- x[!is.na(x$PValue),]
+  cbind(gene=row.names(x), x[,-4])
+}), .id="TimePoint")
+d2 <- dplyr::bind_rows(lapply(fs.deas, FUN=function(x){
+  x <- x[!is.na(x$PValue),]
+  cbind(gene=row.names(x), x[,-4])
+}), .id="TimePoint")
+m <- merge(d1, d2, by=c("gene","TimePoint"), suffix=c(".ars",".fss"))
+m$meanFDR <- rowMeans(as.matrix(m[,grep("FDR",colnames(m))]))
+m$minFDR <- rowMins(as.matrix(m[,grep("FDR",colnames(m))]))
+m <- m[which( (m$FDR.ars<0.05 & abs(m$logFC.ars)>=th.lfc) | 
+                (m$FDR.fss<0.05 & abs(m$logFC.fss)>=th.lfc) ),]
+m$TimePoint <- factor(m$TimePoint, names(fs.deas))
+cors <- sapply(split(m,m$TimePoint), FUN=function(x){
+  cor(x$logFC.ars, x$logFC.fss)
+})
+cors <- data.frame(TimePoint=factor(names(cors),levels(m$TimePoint)),
+                   cor=paste0("cor=",format(cors,digits=2)))
+levels(m$TimePoint)[1] <- levels(cors$TimePoint)[1] <- "45min"
+lfcScatter <- ggplot(m, aes(logFC.fss, logFC.ars)) + 
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) + geom_abline(slope=1, linetype="dashed") +
+  geom_point(aes(alpha=-log10(minFDR))) + geom_smooth(method=MASS::rlm, show.legend = FALSE) + 
+  facet_wrap(~TimePoint) + coord_cartesian(xlim=c(-1.7,2), ylim=c(-1.7,2.5)) +
+  theme_bw() + geom_text(x=2, y=-1.6, hjust=1, data=cors, aes(label=cor)) +
+  labs(x="logFC in FSS", y="logFC in ARS") + theme(legend.position = "none")
+```
+
+```{r, fig.width=10, fig.height=2}
+parGenProf <- function(g, sem=TRUE, nrow=1){
+  d <- meltSE(mse, g)
+  d$feature <- factor(d$feature, unique(d$feature))
+  dag <- agg4Ribb(d, "log2FC", by=c("Dataset","feature","TimePoint"), sem=sem)
+  dag$Time <- c(0,45,90,180)[as.integer(dag$TimePoint)]
+  dag$paradigm <- dag$Dataset
+  ggplot(dag, aes(Time, log2FC, fill=Dataset)) +
+    geom_hline(yintercept=0, linetype="dashed", colour="grey") +
+    geom_line(aes(colour=paradigm), linewidth=1.1) + 
+    geom_point(aes(colour=paradigm), size=2.5) +
+    geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.4) +
+    facet_wrap(~feature, scales="free_y", nrow=nrow) +
+    labs(x="Time (min)", y="log2(fold-change)") + theme_bw() +
+    scale_y_continuous(breaks=scales::pretty_breaks(n=3)) +
+    scale_fill_discrete(guide="none") +
+    theme(axis.text.x=element_text(angle=90, hjust=1))
+}
+pgenes <- parGenProf(c("Fos","Fosb","Npas4","Egr1", "Apold1","Fkbp5"), nrow=2) +
+  theme(legend.position="bottom")
+```
+
+
+
+
+
+```{r, fig.width=9, fig.height=13}
+designs <- plot_grid(
+  ggdraw() + draw_image("design_ARS.png") + draw_text("Acute Restraint Stress (ARS)", x=0.6, y=1, size=12, vjust=1),
+  ggdraw() + draw_image("design_FSS.png") + draw_text("Forced Swim Stress (FSS)", x=0.6, y=1, size=12, vjust=1),
+  nrow=1, rel_widths=c(747,466), scale=0.95, labels=c("A","D"))
+
+p0 <- plot_grid(
+  ggdraw() + draw_image("design_ARS.png") + draw_text("Acute Restraint Stress (ARS)", x=0.6, y=1, size=12, vjust=1),
+  grid.grabExpr(draw(h0, merge=TRUE), wrap.grobs = TRUE),
+  nrow=2, rel_heights=c(1,4), labels=LETTERS[1:2], scale=0.95)
+
+row1 <- plot_grid(p0, mds, nrow=1, rel_widths=c(3,5), labels=c(NA,"C"), scale=c(1,1))
+row2 <- plot_grid(vol, ma, labels=c("D","E"), scale=0.95, nrow=2, rel_heights=c(4,3))
+row3 <- plot_grid(
+  plot_grid(ggdraw() + draw_image("design_FSS.png") + draw_text("Forced Swim Stress (FSS)", x=0.6, y=1, size=12, vjust=1),
+            grid.grabExpr(draw(h1a, merge=TRUE), wrap.grobs=TRUE),
+            nrow=2, rel_heights=c(1.2,4), scale=0.95, labels=c("F","G")),
+  pgenes, 
+  scale=c(1,0.95), labels=c(NA,"H"), nrow=1)
+
+pdf("Figure1.pdf", width=9, height=12)
+plot_grid(row1, row2, row3, lfcScatter, rel_heights=c(3.2,3.2,3,2), nrow=4, labels=c(NA,NA,NA,"I"), scale=c(1,1,1,0.95))
+dev.off()
+```
+

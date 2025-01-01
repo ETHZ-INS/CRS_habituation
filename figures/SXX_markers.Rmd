@@ -1,0 +1,60 @@
+---
+title: 'Supplementary Figure comparing ADT to neuroestimator'
+output: html_document
+date: "2024-10-27"
+---
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(patchwork)
+  library(RColorBrewer)
+  library(scater)
+})
+theme_set(theme_bw())
+source("../scMultiome/GEX_analysis/functions.R")
+```
+
+
+```{r, fig.height=13, fig.width=9}
+sce <- readRDS("../scMultiome/GEX_analysis/neuronal.SCE.rds")
+sce <- logNormCounts(sce)
+markers <- list(
+  neuronal = c("Snap25", "Stmn2",  "Rbfox3", "Grin2b"),
+  excitatory = c("Slc17a7","Slc17a6","Camk2a","Neurod6","Nrn1"),
+  inhibitory = c("Gad1","Gad2","Vip","Slc6a1","Pvalb","Sst","Lamp5","Slc32a1"),
+  "CA1-CA3\ndorsal/ventral" = c("Lefty1","Gpc3","Iyd","Fam107a"),
+  subiculum = c("Fn1","Cntnap4","Ly6g6e"),
+  others = c("Calb2", "Camk2d","Tshz3","Slc4a4","Sema3c","Igfbpl1", "Adarb2")
+)
+g2cat <- setNames(rep(names(markers),lengths(markers)), unlist(markers))
+mm <- intersect(row.names(sce),unlist(markers))
+d <- summarizeAssayByGroup(logcounts(sce)[mm,], ids=colData(sce)[,c("celltype")], statistics = c("mean", "prop.detected"))
+d <- meltSE(d, row.names(d))
+d$cat <- g2cat[as.character(d$feature)]
+d$propMax <- exp(d$mean-1L)/exp(sapply(split(d$mean, d$feature), max)-1)[as.character(d$feature)]
+d$type <- ifelse(grepl("ExN", d$ids), "excitatory", "inhibitory")
+d$type[grep("^N\\.",d$ids)] <- NA_character_
+  
+d2 <- data.frame(ids=sce$celltype, vd=sce$vd, sum=sce$log10sum)
+d2$meanVD <- sapply(split(d2$vd, d2$ids), mean)[d2$ids]
+d2$type <- ifelse(grepl("ExN", d2$ids), "excitatory", "inhibitory")
+d2$type[grep("^N\\.",d2$ids)] <- NA_character_
+
+p1 <- ggplot(d, aes(ids, feature, size=prop.detected, colour=propMax)) + geom_point() + 
+    facet_grid(cat~type, scale="free", space="free") + theme_bw() +
+    theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
+    scale_size(range=c(0,8)) + scale_color_viridis_c(direction = -1, option="rocket") + 
+    labs(colour="Proportion of\nmaximum mean\nexpression", y="Markers", x="")
+
+p2 <- ggplot(d2, aes(ids, vd, fill=meanVD, group=ids)) + geom_hline(yintercept = 0) +
+      geom_violin(scale = "width") + stat_summary(fun = "median") +
+  facet_grid(cols=vars(type), scales = "free_x", space="free") + 
+  theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) + labs(x="", y="Ventral/Dorsal score") +
+  scale_fill_gradient2(low = "darkred", mid="grey", high = "darkblue", breaks=c(-1,1), labels=c("dorsal","ventral"))
+pdf("SXX_markers.pdf", width=9, height=12)
+p2/p1 + plot_layout(heights=c(1.1,6))
+dev.off()
+```
+

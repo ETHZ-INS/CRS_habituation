@@ -1,0 +1,415 @@
+---
+title: "Timeline of Acute Restraint Stress (ARS)"
+author: "Pierre-Luc Germain"
+date: "2023-05-23"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+knitr::opts_chunk$set(dev="CairoPNG")
+suppressPackageStartupMessages({
+  library(sechm)
+  library(edgeR)
+  library(stageR)
+  library(ggplot2)
+})
+source("../functions/functions.R")
+th.lfc <- log2(1.3)
+```
+
+## Transcriptome DEA
+
+```{r}
+se <- readRDS("data/ARS.full.SE.rds")
+mm <- model.matrix(~Sex+TimePoint, data=as.data.frame(colData(se)))
+dds <- calcNormFactors(DGEList(assay(se)))
+assays(se)$logcpm <- log1p(cpm(dds))
+dds <- dds[filterByExpr(dds,mm),]
+set.seed(123)
+se <- SEtools::svacor(se, ~Sex+TimePoint, n.sv = 5)
+assays(se)$corrected <- round(assays(se)$corrected,2)
+assays(se)$logcpm <- round(assays(se)$logcpm,2)
+# plgINS::plPCA(assays(se)$corrected[row.names(dds),], colorBy = se$TimePoint, 
+#               shapeBy = se$Sex, add.labels = FALSE)
+se <- sechm::log2FC(se, "corrected", se$TimePoint=="0min", by=se$Sex, isLog = TRUE)
+f <- paste(c("~Sex",grep("^SV[1-9]+",colnames(colData(se)), value=TRUE),"TimePoint"), collapse="+")
+mm <- model.matrix(as.formula(f), data=as.data.frame(colData(se)))
+dds <- estimateDisp(dds,mm)
+fit <- glmFit(dds, mm)
+
+# globally DE
+deaAny <- as.data.frame(topTags(glmLRT(fit, grep("TimePoint",colnames(mm),value=TRUE)),Inf))
+rowData(se)$global.FDR <- 1
+rowData(se)[row.names(deaAny),"FDR"] <- deaAny$FDR
+se <- se[,order(se$TimePoint,se$Sex)]
+```
+
+### Per-timepoint DEA
+
+```{r}
+for(f in levels(se$TimePoint)[-1]){
+  res <- as.data.frame(topTags(glmLRT(fit, paste0("TimePoint",f)), Inf))
+  rowData(se)[[paste0("DEA.",f)]] <- res[row.names(se),]
+  attr(rowData(se)[[paste0("DEA.",f)]], "description") <- 
+    paste("ARS transcriptomic changes at", f)
+}
+adegs <- getDEGs(se, lfc.th=th.lfc)
+adegs <- intersect(adegs, row.names(se))
+```
+
+### Global overview
+
+```{r}
+sechm(se, head(row.names(deaAny),100), assayName="scaledLFC", gaps_at="TimePoint", top_annotation=c("TimePoint","Sex"),
+      row_title="Union of all DEGs")
+```
+
+
+#### Known IEGs
+
+```{r}
+args <- readRDS("../extDat/ARGs.TyssowskiNeuron2018.rds")
+args2 <- lapply(args, y=adegs, FUN=intersect)
+sechm(se, args2$rapidPRGs, assayName="scaledLFC", gaps_at="TimePoint", top_annotation=c("TimePoint","Sex"),
+      row_title="Rapid Primary\nResponse Genes (PRGs)") %v%
+sechm(se, c(args2$delayedPRGs,args2$SRGs), assayName="scaledLFC", gaps_at="TimePoint", top_annotation=c("TimePoint","Sex"),
+      row_title="Delayed PRGs and\nSecondary Response Genes")
+```
+
+
+
+### Sex interactions
+
+#### Sex differences (no stress interactions)
+
+```{r}
+res <- as.data.frame(topTags(glmLRT(fit, grep("Sex",colnames(mm),value=TRUE)), Inf))
+rowData(se)$DEA.maleVsFemale <- res[row.names(se),]
+sexDiff <- row.names(res)[abs(res$logFC)>th.lfc & res$FDR<0.05]
+sechm(se, sexDiff, assayName="corrected", do.scale = TRUE, gaps_at="Sex", top_annotation=c("TimePoint"),
+      row_title="Sex differences")
+```
+
+### Sex-stress interactions
+
+```{r}
+screen <- as.data.frame(topTags(glmLRT(fit, grep("Sex|TimePoint",colnames(mm),value=TRUE)), Inf))
+f <- paste(c("~Sex",grep("^SV[1-9]+",colnames(colData(se)), value=TRUE),"Sex:TimePoint+TimePoint"), collapse="+")
+mm <- model.matrix(as.formula(f), data=as.data.frame(colData(se)))
+dds <- estimateDisp(dds,mm)
+fullFit <- glmFit(dds, mm)
+se <- stagedInteractions(se, screen, fullFit=fullFit, coefs=grep(":",colnames(mm),value=TRUE))
+deas <- getDEA(se)
+sexInt <- unique(unlist(lapply(deas[grep("^int",names(deas))], FUN=function(x)
+                          row.names(x)[which(x$FDR<0.05 & abs(x$logFC)>th.lfc)])))
+```
+
+
+```{r}
+sechm(se, sexInt, assayName="log2FC", gaps_at="Sex", top_annotation=c("TimePoint"),
+      row_title="Stress-responsive genes modulated by sex")
+```
+
+The vast majority of differences are very small in magnitude.
+
+### Comparison of foldchanges
+
+```{r}
+fcs <- scuttle::sumCountsAcrossCells(assays(se)$log2FC, colData(se)[,c("Sex","TimePoint")], average=TRUE)
+colnames(fcs) <- paste(fcs$Sex,fcs$TimePoint)
+fcs <- fcs[adegs,]
+fcs <- reshape2:::melt(assay(fcs), value.name="log2FC", factorsAsStrings=FALSE)
+fcs$Sex <- as.factor(gsub(" .+","",fcs$Var2))
+fcs$TimePoint <- factor(gsub("^.+ ","",fcs$Var2), levels(se$TimePoint))
+fcs <- fcs[fcs$TimePoint!="0min",]
+fcs2 <- do.call(rbind, lapply(split(fcs, droplevels(fcs$TimePoint)), FUN=function(x){
+  dea <- as.character(x$TimePoint[1])
+  dea <- intersect(c(dea,
+                     paste0("inter.Sexmale.TimePoint",dea)), names(deas))
+  degs <- lapply(deas[dea],FUN=function(dea){
+    row.names(dea)[which(abs(dea$logFC)>th.lfc & dea$FDR<0.05)]
+  })
+  int.degs <- c()
+  if(length(dea)>1) int.degs <- degs[[2]]
+  x <- x[which(x$Var1 %in% unique(unlist(degs))),]
+  y <- x[x$Sex=="male",]
+  y <- y[order(y$log2FC),]
+  g2r <- setNames(seq_along(y$Var1), y$Var1)
+  x$rank <- g2r[as.character(x$Var1)]
+  x$sig.int <- x$Var1 %in% int.degs
+  x
+}))
+```
+
+
+```{r}
+fcs2 <- fcs2[fcs2$TimePoint != "24h",]
+fci <- fcs2[fcs2$sig.int & fcs2$Sex=="female",]
+ggplot(fcs2, aes(rank, log2FC, colour=Sex)) + geom_point() + 
+  facet_wrap(~TimePoint, scales = "free_x") + xlab("Rank in males") +
+  ggrepel::geom_text_repel(data=fci, aes(label=Var1), min.segment.length=0, colour="black")
+```
+
+
+## Comparison with forced swim
+
+```{r}
+fs <- readRDS("../extDat/TimeSeriesFST_DEA.SE.Rds")
+fs <- sechm::log2FC(fs, controls=fs$TimePoint=="0min", fromAssay="corrected", by=fs$Region, isLog=TRUE)
+fs <- fs[,fs$Region=="vHC"]
+fs$TimePoint <- gsub("1h30min","1h30",fs$TimePoint)
+fullMSE <- SEtools::mergeSEs(list(Restraint=se, Swim=fs), use.assays=c("log2FC","scaledLFC"), keepRowData=FALSE, do.scale=FALSE)
+fullMSE$TimePoint <- factor(fullMSE$TimePoint, c("0min", "45min", "1h30", "2h", "3h", "4h", "5h30", "24h"))
+metadata(fullMSE)$anno_colors <- 
+  list(TimePoint=setNames(RColorBrewer::brewer.pal(length(levels(fullMSE$TimePoint)), "YlOrRd"),
+                                                     levels(fullMSE$TimePoint)))
+
+mse <- fullMSE[,fullMSE$TimePoint %in% c("0min","45min","1h30","3h")]
+mse$TimePoint <- factor(mse$TimePoint, c("0min","45min","1h30","3h"))
+metadata(mse)$anno_colors <- list(TimePoint=setNames(RColorBrewer::brewer.pal(length(levels(mse$TimePoint)), "YlOrRd"),
+                                                     levels(mse$TimePoint)))
+
+fs.degs <- getDEGs(getDEA(fs)[paste0("vHC_",c("45min","1h30min","3h"))], lfc.th = th.lfc)
+udegs <- union(fs.degs,adegs)
+
+
+sechm(mse[,order(mse$Dataset, mse$TimePoint)], udegs, assayName="scaledLFC", do.scale=FALSE, gaps_at="Dataset",
+      top_annotation=c("TimePoint"), row_title="Union of all DEGs")
+```
+
+Overall we see a very similar pattern of response to both stress paradigms, although the effects of restraint appear to last a bit longer, most likely due to the stress itself being longer.
+
+To better see differences, we can compare the logFC of genes found significant at specific timepoints:
+
+```{r}
+m <- dplyr::bind_rows(lapply(c("45min","1h30"), FUN=function(x){
+  x2 <- paste0("vHC_",x)
+  m <- merge(getDEA(se, x), getDEA(fs, x2), by="row.names", suffix=c(".ARS",".FSS"))
+  m$TimePoint <- x
+  ud45 <- union(getDEGs(fs, x2),getDEGs(se, x))
+  m$meanFDR <- (m$FDR.ARS+m$FDR.FSS)/2
+  m[which(m$Row.names %in% ud45),]
+}))
+ggplot(m, aes(logFC.ARS, logFC.FSS, alpha=-log10(meanFDR))) + 
+  geom_vline(xintercept=0, linetype="dashed") + geom_hline(yintercept=0, linetype="dashed") + 
+  geom_point() + facet_wrap(~TimePoint)
+```
+
+If we try to focus on genes that are different between the paradigms:
+
+```{r}
+mdiff <- m[which( (m$FDR.ARS<0.05 & m$FDR.FSS>0.5 & (m$logFC.ARS>0.45 | abs(m$logFC.ARS)>0.6) & abs(m$logFC.FSS)<0.1) |
+               (m$FDR.FSS<0.05 & m$FDR.ARS>0.5 & (m$logFC.FSS>0.45 | abs(m$logFC.FSS)>0.6) & abs(m$logFC.ARS)<0.1) ),]
+saveRDS(mdiff, file="FSS_ARS_diffs.rds")
+mse <- mse[,order(mse$Dataset, mse$TimePoint)]
+sechm(mse[,mse$TimePoint %in% c("0min","45min","1h30","3h")], unique(mdiff$Row.names), assayName="log2FC",
+      do.scale=FALSE, gaps_at="Dataset",
+      top_annotation=c("TimePoint"), row_title="Differentially-responding in ARS and FSS")
+```
+
+We observe that the differences are very small in magnitude, or are chiefly differences in dynamics,
+for example Apold1 that is activated for a longer period in ARS than FSS, or the opposite for Egr1.
+Some exceptions include are the splicing factor Srsf5 and MAPK-binding Trib1, which appears specifically upregulated upon Swim stress.
+
+To confirm the robustness of these differences, we looked up our earlier dataset comparing, in a single experiment, restraint and swim at 45min:
+
+```{r}
+ss <- readRDS("../extDat/Stressome.vHC.SE.rds")
+ss <- SEtools::svacor(ss, ~Condition2, n.sv=1)
+ss <- log2FC(ss, ss$Condition=="Homecage", fromAssay="corrected", isLog=TRUE)
+sechm(ss, unique(mdiff$Row.names[which(mdiff$TimePoint=="45min")]), assayName="log2FC",
+      do.scale=FALSE, gaps_at="Condition2",
+      top_annotation=c(), row_title="Differentially-responding in ARS and FSS at 45min")
+```
+
+We could not confirm any of these stressor-specific genes (in fact the pattern for Trib1 and Srsf5 is the opposite), suggesting that these mild differences are chiefly attributable to experimental variability.
+
+On the other hand, we do have different dynamics between the paradigms, presumably because of the longer duration of the restraint test. To see this more clearly, we identify genes that peak at different timepoints in stress and restraint:
+
+```{r}
+fsd <- getDEA(fs)
+fsd <- fsd[grep("^vHC_[0-9]",names(fsd))]
+sed <- getDEA(se)
+sed <- sed[grep("male",names(sed),invert=TRUE)]
+fsm <- sapply(fsd, FUN=function(x) x[udegs,"logFC"])
+rsm <- sapply(sed, FUN=function(x) x[udegs,"logFC"])
+row.names(fsm) <- row.names(rsm) <- udegs
+#colnames(fsm) <- colnames(rsm)
+colnames(fsm) <- gsub("vHC_","",colnames(fsm))
+w <- which(matrixStats::rowMaxs(abs(fsm))>0.15 & matrixStats::rowMaxs(abs(rsm))>0.15)
+fsm <- fsm[w,]
+rsm <- rsm[w,]
+getPeak <- function(x){
+  apply(abs(x) >= 0.9*matrixStats::rowMaxs(abs(x)), 1, FUN=function(x) head(which(x),1))*
+    ((matrixStats::rowMaxs(abs(x))==matrixStats::rowMaxs(x))*2-1)
+}
+peaks <- data.frame(
+  row.names=row.names(fsm),
+  FSS=getPeak(fsm[,c(1,2,4)]),
+  ARS=getPeak(rsm[,1:3]),
+  isARG=row.names(fsm) %in% unlist(args)
+)
+peaks$diff <- peaks[,1]!=peaks[,2]
+```
+
+```{r}
+sechm(mse[,mse$TimePoint %in% c("0min","45min","1h30","3h")], row.names(peaks)[!peaks$diff], 
+      assayName="scaledLFC", do.scale=FALSE, gaps_at="Dataset", mark=c("Fos","Npas4","Junb","Egr1","Dusp5"),
+      top_annotation=c("TimePoint"), row_title="Same dynamics") %v%
+sechm(mse[,mse$TimePoint %in% c("0min","45min","1h30","3h")], row.names(peaks)[peaks$diff], assayName="scaledLFC",
+      do.scale=FALSE, gaps_at="Dataset", mark=c("Gadd45g","Maff"),
+      top_annotation=c("TimePoint"), row_title="Different dynamics")
+```
+
+We observe that most canonical IEGs show the same peaking dynamic, indicating that they are dependent on the onset of stress.
+Instead, among the known activity-regulated genes that show different peaking dynamics are _Gadd45g_, which is responsible for shutting down the _eIF2α_-dependent translation of ATF4 (itself critical to the integrated stress response and the AP1-CREB axis of regulation), as well as _Maff_, an important transcriptional repressor suspected of shutting down the primary response.
+This therefore suggests that the genes with a different peaking dynamic are dependent on the stress offset, rather than onset.
+
+Another way to look at it is to group genes by their peaking timepoint, and identify stable and discordant groups:
+
+```{r}
+peaks$cluster <- factor(paste(peaks[,1],peaks[,2]))
+levels(peaks$cluster) <- gsub("1 3","1 2",levels(peaks$cluster))
+levels(peaks$cluster) <- gsub("2 1","2 2",levels(peaks$cluster))
+sp <- split(row.names(peaks), peaks$cluster)
+sp <- sp[lengths(sp)>1 & !grepl("-",names(sp))]
+
+getClusterTimeAgg <- function(x, agg=TRUE){
+  fsm <- cbind("0min"=rep(0,nrow(fsm)), fsm)[x,,drop=FALSE]
+  rsm <- cbind("0min"=rep(0,nrow(rsm)), rsm)[x,,drop=FALSE]
+  rmx <- matrixStats::rowMaxs(abs(cbind(fsm,rsm)))
+  d1 <- as.data.frame(reshape2::melt(fsm/rmx))
+  d2 <- as.data.frame(reshape2::melt(rsm/rmx))
+  d1$paradigm <- "FSS"
+  d2$paradigm <- "ARS"
+  m <- rbind(d1,d2)
+  if(!agg){
+    colnames(m) <- c("Gene","TimePoint","propOfPeak","paradigm")
+    return(m)
+  }
+  msd <- aggregate(m[,3], by=m[,c(2,4)], FUN=function(x){ # SEM
+    sd(x)/sqrt(length(x))
+  })
+  msd[is.na(msd)] <- 1
+  mm <- aggregate(m[,3], by=m[,c(2,4)], FUN=mean)
+  colnames(mm) <- c("TimePoint","paradigm","mean")
+  mm$lower <- mm$mean-msd[,3]
+  mm$upper <- mm$mean+msd[,3]
+  mm
+}
+d <- dplyr::bind_rows(lapply(sp, agg=FALSE, FUN=getClusterTimeAgg), .id="cluster")
+d <- d[d$TimePoint!="24h",]
+d$Time <- c(0,45,90,120,180,240,90,5.5*60,NA)[as.integer(d$TimePoint)]
+```
+
+
+```{r, warning=FALSE}
+ggplot(d, aes(Time, propOfPeak, colour=paradigm)) + geom_smooth() +
+  facet_wrap(~cluster) + labs(x="Time (min)", y="Proportion of max response")
+```
+
+Or without smoothing:
+
+```{r}
+d2 <- dplyr::bind_rows(lapply(sp, agg=TRUE, FUN=getClusterTimeAgg), .id="cluster")
+d2 <- d2[d2$TimePoint!="24h",]
+d2$Time <- c(0,45,90,120,180,240,90,5.5*60,NA)[as.integer(d2$TimePoint)]
+ggplot(d2, aes(Time, mean, fill=paradigm)) + facet_wrap(~cluster) +
+  geom_line(aes(colour=paradigm), linewidth=1.3) + geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.2) + 
+  labs(x="Time (min)", y="Proportion of max response")
+```
+
+
+Almost systematically, FSS returns towards baseline either at the same speed as ARS or faster.
+Even genes that peak together (e.g. cluster "2 2") sometimes show a slower decay in ARS, suggesting that although they are onset-dependent, their upregulation is maintained throughout exposure.
+These include for instance the Noradrenaline-dependent Dio2, the hypoxia factor Hif3a, 
+
+We next compared the speed at which these responses return to normal:
+
+```{r}
+getRet <- function(x){
+  apply(abs(x)/matrixStats::rowMaxs(abs(x)), 1, FUN=function(x){
+    wPeak <- head(which(x>0.9),1)
+    wRet <- which(x<0.2)
+    wRet <- head(wRet[which(wRet>wPeak)],1)
+    if(length(wRet)==0) wRet <- length(x)+1L
+    wRet
+  })
+}
+peaks$retFSS <- getRet(fsm[,c(1,2,4)])
+peaks$retARS <- getRet(rsm[,1:3])
+peaks$cluster2 <- factor(paste(peaks[,1],peaks[,2],peaks$retFSS,peaks$retARS))
+levels(peaks$cluster2) <- gsub("^1 3","1 2",levels(peaks$cluster2))
+levels(peaks$cluster2) <- gsub("^2 1","2 2",levels(peaks$cluster2))
+levels(peaks$cluster2) <- gsub("1 1 3 2|1 1 3 4|1 1 3 3","1 1 2 3",levels(peaks$cluster2))
+levels(peaks$cluster2) <- gsub("1 2 4 3","1 2 3 3",levels(peaks$cluster2))
+sp <- split(row.names(peaks), peaks$cluster2)
+sp <- sp[lengths(sp)>2 & !grepl("-",names(sp))]
+```
+
+```{r}
+d2 <- dplyr::bind_rows(lapply(sp, agg=TRUE, FUN=getClusterTimeAgg), .id="cluster")
+d2 <- d2[d2$TimePoint!="24h",]
+d2$Time <- c(0,45,90,120,180,240,90,5.5*60,NA)[as.integer(d2$TimePoint)]
+ggplot(d2, aes(Time, mean, fill=paradigm)) + facet_wrap(~cluster) +
+  geom_line(aes(colour=paradigm), linewidth=1.3) + geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.2) + 
+  labs(x="Time (min)", y="Proportion of max response")
+```
+
+```{r}
+peaks$delayedOnset <- peaks$ARS>peaks$FSS
+peaks$delayedReturn <- peaks$retARS>peaks$retFSS
+pUp <- peaks[which(peaks$FSS>0 & peaks$ARS>0),]
+sp <- split(row.names(pUp), paste(pUp$delayedOnset, pUp$delayedReturn))
+names(sp) <- c("Same dynamics", "Delayed return", "Delayed onset", "Shifted")
+sp2 <- c(sp[2],list("Delayed onset"=unlist(sp[3:4])))
+h <- NULL
+for(f in names(sp2))
+    h <- h %v% 
+        sechm(fullMSE[,which(fullMSE$TimePoint!="2h")], sp2[[f]], 
+              assayName="scaledLFC", do.scale=FALSE, gaps_at="Dataset", mark=c("Fos","Dusp1","Npas4","Maff","Gadd45g"),
+              top_annotation=c("TimePoint"), row_title=f, show_rownames=FALSE)
+h
+```
+
+Some example genes:
+
+```{r}
+d <- meltSE(fullMSE, c("Gadd45g","Apold1","Fkbp5"))
+ggplot(d[which(!(d$TimePoint %in% c("24h"))),],
+       aes(TimePoint, log2FC, fill=Dataset)) +
+  geom_boxplot(outlier.color = NA) + 
+  facet_grid(Dataset~feature, scales="free_y") +
+  theme(axis.text.x=element_text(angle=90, hjust=1))
+```
+
+
+```{r, fig.height=2, fig.width=5}
+dag <- agg4Ribb(d, "log2FC", by=c("Dataset","feature","TimePoint"))
+dag <- dag[which(!(dag$TimePoint %in% c("24h"))),]
+dag$Time <- c(0,45,90,120,180,240,5.5*60,24*60)[as.integer(dag$TimePoint)]
+ggplot(dag, aes(Time, log2FC, fill=Dataset)) +
+  geom_hline(yintercept=0, linetype="dashed", colour="grey") +
+  geom_line(aes(colour=Dataset)) + 
+  geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.2) +
+  facet_wrap(~feature, scales="free_y", nrow=1) +
+  theme(axis.text.x=element_text(angle=90, hjust=1))
+```
+
+We save some info in the object:
+
+```{r}
+rowData(se)$ARG <- NA_character_
+for(f in names(args)) rowData(se)[intersect(args[[f]], row.names(se)),"ARG"] <- f
+rowData(se)$ARG <- factor(rowData(se)$ARG)
+peaks <- peaks[intersect(row.names(peaks), row.names(se)),]
+for(f in c("ARS","FSS","cluster","cluster2","delayedOnset","delayedReturn")){
+  rowData(se)[[f]] <- NA_character_
+  rowData(se)[row.names(peaks),f] <- peaks[[f]]
+  if(is.logical(peaks[[f]])) rowData(se)[[f]] <- as.logical(rowData(se)[[f]])
+}
+saveRDS(se, "ARS.SE.rds")
+```
+

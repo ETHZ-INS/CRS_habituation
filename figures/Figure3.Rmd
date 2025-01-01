@@ -1,0 +1,244 @@
+---
+title: "Figure 3 - damping patterns"
+author: "Pierre-Luc Germain"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(dev="CairoPNG")
+suppressPackageStartupMessages({
+  library(sechm)
+  library(edgeR)
+  library(stageR)
+  library(ggplot2)
+  library(cowplot)
+  library(patchwork)
+  library(clusterProfiler)
+})
+source("../functions/functions.R")
+source("../functions/clusterProfiling.R")
+th.lfc <- log2(1.2)
+```
+
+```{r}
+se <- readRDS("../rnaDEAs/all.full.SE.rds")
+se <- updateSEforPlots(se)
+degs <- getDEGs(getDEA(se)[1:5], lfc.th = th.lfc)
+```
+
+```{r}
+set.seed(123)
+ll <- mdsTimeProj(se, degs, ref=which(se$Treatment=="Handling +ARS"))
+# rotate a tiny bit to avoid a group overlapping the radian flip:
+ll$d$rad2 <- ll$d$rad-(min(ll$d$rad)+pi)
+ll$d$rad2[ll$d$rad2< -3.14] <- pi
+ag <- ll$agg
+p1 <- ggplot(ll$d[ll$d$isRef,], aes(x, y, colour=-rad)) + geom_point() + 
+  annotate('segment', x=0, y=0, yend=ag$y[2:3], xend=ag$x[2:3], linewidth=1) +
+  geom_label(data=ll$agg, aes(label=TimePoint)) +
+  scale_color_gradientn(colours=pals::kovesi.cyclic_mrybm_35_75_c68_s25(100)) +
+  theme_bw() + labs(y="MDS2", x="MDS1", colour="angle\n(radian)")
+
+tmpx <- 0.025/sqrt(sum((ag[2,2:3])^2))*ag$x[2]
+p1 <- p1 + annotate('curve', x=0.025, y=0, xend=tmpx, yend=tmpx*ag$y[2]/ag$x[2],
+    linewidth = 1, alpha=0.5, curvature = -0.5, arrow = arrow(length = unit(0.3, 'cm'))) +
+      annotate("point",x=0,y=0, size=4, shape=3, stroke=1.5) +
+      annotate("segment",x=0,y=0, xend=0.05, yend=0, linetype="11", size=1.2, alpha=0.5)
+tmpx <- 0.05/sqrt(sum((ag[3,2:3])^2))*ag$x[3]
+p1 <- p1 + annotate('curve', x=0.05, y=0, yend=tmpx*ag$y[3]/ag$x[3], xend=tmpx,
+    linewidth = 1, alpha=0.5, curvature = -1, arrow = arrow(length = unit(0.3, 'cm')))
+p1 <- p1 + theme(aspect.ratio=1)
+
+crscols <- metadata(se)$anno_colors$Treatment
+crscols[1] <- "grey"
+
+sig <- ifelse(ll$padj.rad<0.001, "***",
+       ifelse(ll$padj.rad<0.01, "**",
+              ifelse(ll$padj.rad<0.05, "*","n.s.")))
+p <- data.frame(TimePoint=names(ll$padj.rad), label=sig)
+p2 <- ggplot(ll$d, aes(TimePoint, y=-rad2)) + geom_boxplot(aes(fill=Treatment)) +
+  theme_bw() + labs(y="MDS angle (radian)") + scale_fill_manual(values=crscols) + 
+  geom_text(data=p, aes(label=label,y=3.25), colour="black")
+p1 + p2
+```
+
+
+Damping patterns:
+
+```{r}
+dp <- readRDS("../rnaDEAs/full.dampingClusters.rds")
+dp <- dp[c(3,1,2)]
+names(dp) <- paste0("cluster ", 1:3, ":\n", names(dp))
+rowData(se)$cluster <- rep(factor(NA,names(dp)),nrow(se))
+rowData(se)[unlist(dp),"cluster"] <- rep(names(dp),lengths(dp))
+
+cl.hm <- sechm(se, unlist(dp), gaps_at="TimePoint", gaps_row="cluster", assayName="scaledLFC", bottom_annotation="Treatment", row_title_rot = 0, top_annotation=c("TimePoint","Treatment"))
+```
+
+
+```{r}
+enr <- readRDS("../rnaDEAs/dampingClusters_enrichments.rds")
+
+sigTerms <- unique(unlist(lapply(enr$vsExpressed$ORA, FUN=function(x){
+  x <- x[x$FDR<0.05 & x$overlap>=5,]
+  if(sum(x$enrichment>3)<2) return(head(row.names(x)))
+  x <- x[x$enrichment>3,]
+  return(head(row.names(x)))
+})))
+ora <- dplyr::bind_rows(lapply(enr$vsExpressed$ORA, FUN=function(x){
+  x <- x[sigTerms,]
+  x$pathway <- sigTerms
+  x
+}), .id="Cluster")
+ora$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",ora$pathway)))
+ora$Cluster <- factor(ora$Cluster, unique(ora$Cluster)[c(3,1,2)])
+
+
+gl.enrP <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,12)) + 
+  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
+  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5),
+                       axis.title=element_blank()) + labs(fill="fold-\nenrichment")
+```
+
+
+Example genes:
+
+```{r, fig.width=10, fig.height=10}
+# selGenes <- list(
+#   "1: Blunted\nat 45min"=c("Apold1", "Btg2", "Maff"), # (others: Npas4, Fosb, Nr4a1, Klf4)
+#   "2: Faster return\nto baseline"=c("Klf9", "Sgk1", "Nrros"), # (others: Klf9, Hif3a, Sgk1, Nrros, Mc4r)
+#   "3: Ablated\nat 3h"=c("Arhgap45", "Surf1", "Il15ra") #(others: Ptgs2, Arhgap45, Cast, Clic4, Ezh2, Flt4, Il15ra, Nde1, Surf1)
+# )
+# 
+# d <- dplyr::bind_rows(lapply(selGenes, \(x) meltSE(se,x)), .id="Cluster")
+# d$feature <- factor(d$feature, unique(d$feature))
+# dag <- aggregate(d[,"log2FC",drop=FALSE], by=d[,c("feature","Treatment","TimePoint")], FUN=median)
+# dag <- agg4Ribb(d, "log2FC", by=c("Treatment","feature","TimePoint"), sem=TRUE)
+# dag <- dag[which(!(dag$TimePoint %in% c("24h"))),]
+# dag$Time <- c(0,45,90,180,240,5.5*60,24*60)[as.integer(dag$TimePoint)]
+# dag$cluster <- setNames(rep(names(selGenes), lengths(selGenes)), unlist(selGenes))[dag$feature]
+# crscols <- c(Handling = "grey", `10days CRS` = "blue3", `20days CRS` = "midnightblue")
+# 
+# ggplot(dag, aes(Time, log2FC, fill=Treatment)) +
+#   geom_hline(yintercept=0, linetype="dashed", colour="grey") +
+#   geom_line(aes(colour=Treatment), linewidth=1.1) + 
+#   geom_point(aes(colour=Treatment), size=2.5) +
+#   geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.4) +
+#   ggh4x::facet_nested(cluster~feature, scales="free", ) +
+#   labs(x="Time (min)", y="log2(fold-change)") + theme_bw() +
+#   scale_y_continuous(breaks=scales::pretty_breaks(n=3)) +
+#   scale_fill_manual(values=crscols, guide="none") +
+#   scale_color_manual(values=crscols) +
+#   theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+
+
+pg1 <- plotGeneProf(se, c("Npas4", "Apold1", "Fos"), nrow=3) + labs(subtitle="1: Blunted\nat 45min")
+# (others: Npas4, Fosb, Nr4a1, Klf4)
+
+pg2 <- plotGeneProf(se, c("Klf9", "Sgk1", "Nrros"), nrow=3) + labs(subtitle="2: Faster return\nto baseline") +
+  theme(axis.title.y = element_blank())
+# (others: Klf9, Hif3a, Sgk1, Nrros, Mc4r)
+
+pg3 <- plotGeneProf(se, c("Surf1", "Ezh2", "Il15ra"), nrow=3) + labs(subtitle="3: Ablated\nat 3h") +
+  theme(axis.title.y = element_blank())
+#(others: Ptgs2, Arhgap45, Cast, Clic4, Ezh2, Flt4, Il15ra, Nde1, Surf1)
+
+pg <- (pg1 + pg2 + pg3) + plot_layout(guides="collect")
+```
+
+# DEX 
+
+
+```{r}
+dex <- readRDS("../extDat/GSE190712_DEX.SE.rds")
+se1 <- dex[,dex$Region %in% c("vCA1","dCA1","vDG")]
+se1 <- se1[,order(se1$Treatment)]
+se1$TimePoint <- se1$Treatment
+levels(se1$TimePoint) <- c("0min","4h")
+metadata(se1)$anno_colors <- list(TimePoint=c("0min"="#FFFFB2", "4h"="darkblue"))
+
+deas <- lapply(unique(se1$Region), FUN=function(x) getDEA(se1, dea=x))
+degs1 <- table(unlist(lapply(deas, getDEGs, fdr.th=0.01)))
+degs1 <- names(degs1)[degs1>1]
+dea <- data.frame(row.names=degs1, logFC=rowMeans(sapply(deas, FUN=function(x) x[degs1,"logFC"])),
+                  FDR=10^rowMeans(sapply(deas, FUN=function(x) log10(x[degs1,"FDR"]))))
+
+dea <- dea[order(dea$FDR),]
+
+se0 <- se[,!(se$TimePoint %in% c("5h30","24h"))]
+se <- se0[,se0$TimePoint %in% c("0min","3h")]
+
+degs2 <- getDEGs(getDEA(se,"3h"))
+degs45 <- intersect(getDEGs(getDEA(se,"45min")),row.names(se1))
+udegs <- intersect(union(degs1,degs2), intersect(row.names(se),row.names(se1)))
+
+mse <- SEtools::mergeSEs(list("ARS"=se[,order(se$TimePoint)], "DEX"=se1), use.assays=c("log2FC", "scaledLFC"), do.scale=FALSE, keepRowData=FALSE)
+metadata(mse) <- metadata(se)
+metadata(mse)$anno_colors$TimePoint <- c(`0min` = "#FFFFB2", `3h` = "#FD8D3C", "4h"="darkred")
+dex.hm1a <- sechm(mse, degs2, assayName="scaledLFC", gaps_at="Dataset",
+      top_annotation = c("TimePoint","Treatment"), breaks=0.995,
+      row_title="DEGs from 3h ARS")
+
+se$TimePoint <- droplevels(se$TimePoint)
+se1$Treatment <- levels(se$Treatment)[1]
+se$Region <- "HC"
+tpc <- c(`0min` = "#FFFFB2", `3h` = "#FD8D3C", "4h"="darkred")
+metadata(se)$anno_colors$TimePoint <- metadata(se1)$anno_colors$TimePoint <- tpc
+# rc <- setNames(pipeComp::getQualitativePalette(4), c("HC",unique(se1$Region)))
+# metadata(se)$anno_colors$Region <- metadata(se1)$anno_colors$Region <- rc
+dex.hm1b <- crossHm(list("ARS"=se[,order(se$TimePoint)], "DEX"=se1), degs2, do.scale = FALSE, assayName = "log2FC", row_title="DEGs from 3h ARS", breaks=0.995, top_annotation = c("TimePoint","Treatment"), merge_legends = FALSE)
+
+dd <- merge(getDEA(se,"3h")[udegs,], dea[udegs,], by="row.names", suffix=c(".ARS",".DEX"))
+row.names(dd) <- dd$Row.names
+dd$minFDR <- pmin(dd$FDR.ARS,dd$FDR.DEX)
+cc <- cor.test(dd$logFC.ARS,dd$logFC.DEX)
+cc <- paste0("Peason cor: ", round(cc$estimate,3), "\np<2e-16")
+ccp <- ggplot(dd, aes(logFC.ARS, logFC.DEX)) + geom_hline(yintercept=0, colour="darkgrey") + geom_vline(xintercept = 0, colour="darkgrey") + geom_abline(intercept=0, slope=1, linetype="dashed") + geom_point(aes(alpha=-log10(minFDR))) + geom_smooth(formula=y~0+x, method=MASS::rlm) +
+  theme_bw() + annotate("text", x=2.2, y=-2, label=cc, hjust=1, vjust=0) +
+  theme(legend.position = c(0.05,0.95), legend.justification=c(0,1)) +
+  labs(x="logFC 3h after ARS", y="logFC 4h after DEX")
+
+
+sli <- readRDS("../extDat/GSE79790_slices.SE.rds")
+sli$TimePoint <- sli$time
+sli$Treatment <- sli$treatment
+sli <- sli[,order(sli$treatment, sli$TimePoint)]
+tmp <- se0[,se0$TimePoint %in% c("0min","45min","1h30","3h")]
+tmp <- tmp[,order(tmp$TimePoint,tmp$Treatment)]
+
+metadata(sli)$anno_colors$TimePoint <- metadata(tmp)$anno_colors$TimePoint <- 
+  setNames(RColorBrewer::brewer.pal(7,"YlOrRd"), c("0min","30min","45min","60min","1h30","120min","3h"))
+metadata(sli)$anno_colors$Treatment <- c(Control="white", Forskolin="black")
+
+hm2 <- sechm(tmp, lapply(dp,intersect,y=row.names(sli)), assayName="log2FC",
+             top_annotation = c("TimePoint","Treatment"), breaks=0.985, row_title_rot = 0,
+             width=unit(5,"cm"), column_title="ARS in vivo vHC", isMult = TRUE) + 
+  sechm(sli, dp, assayName="log2FC", top_annotation=c("TimePoint","Treatment"),
+        breaks=0.985, width=unit(2,"cm"), column_title="Forskolin in\n slices")
+
+# mse <- SEtools::mergeSEs(list("ARS in vivo vHC"=tmp, "Forskolin in\nhippocampal slices"=sli), use.assays=c("log2FC","scaledLFC"), do.scale=FALSE, keepRowData=FALSE)
+# mse$TimePoint <- factor(as.character(mse$TimePoint), c("0min","30min","45min","60min","1h30","120min","3h"))
+# levels(mse$TimePoint)[c(4,6)] <- c("1h","2h")
+# metadata(mse)$anno_colors$TimePoint <- 
+#   setNames(RColorBrewer::brewer.pal(7,"YlOrRd"), levels(mse$TimePoint))
+# metadata(mse)$anno_colors$Treatment <- c(metadata(mse)$anno_colors$Treatment, Control="white", Forskolin="black")
+# hm2 <- sechm(mse, dp, assayName="log2FC", gaps_at="Dataset", top_annotation = c("TimePoint","Treatment"), breaks=0.985)
+```
+
+
+```{r, fig.width=12, fig.height=15}
+pdf("Figure3.pdf", width=12, height=15)
+cowplot::plot_grid(
+  plot_grid(p1, p2, nrow=1, rel_widths=c(3,5), labels="AUTO", scale=0.95),
+  plot_grid(
+    grid.grabExpr(draw(cl.hm, merge=TRUE)),
+    gl.enrP, nrow=1, labels=c("C","D"), scale=0.95, rel_widths = c(5,4)),
+  plot_grid(pg, grid.grabExpr(draw(dex.hm1b, merge=TRUE)), nrow=1, labels=c("E","F"), scale=0.95, rel_widths = c(5,4)),
+  plot_grid(ccp, grid.grabExpr(draw(hm2, merge=TRUE), wrap.grobs = TRUE), nrow=1, labels=c("G","H"), scale=0.95),
+  nrow=4, rel_heights = c(0.7,1.3,1,0.9)
+)
+dev.off()
+```
+
+

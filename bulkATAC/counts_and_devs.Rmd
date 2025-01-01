@@ -1,0 +1,323 @@
+---
+title: "Get insertion counts in peaks"
+author: "Pierre-Luc Germain"
+date: "2024/10/18"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(BiocParallel)
+  library(chromVAR)
+  library(motifmatchr)
+  library(SummarizedExperiment)
+  library(rtracklayer)
+  library(GenomicRanges)
+  library(GenomicAlignments)
+  library(readxl)
+  library(ensembldb)
+  library(AnnotationHub)
+  library(edgeR)
+})
+ah <- AnnotationHub(cache="/common/AnnotationHub/", localHub=TRUE)
+ensdb <- ah[["AH89211"]]
+source("../functions/GCnorm.R")
+genome <- Rsamtools::FaFile("/reference/Mus_musculus/Ensembl/GRCm38/Sequence/WholeGenomeFasta/Mus_musculus.GRCm38.dna_sm.primary_assembly.fa")
+# we remove clear outliers on the MDS plot -- when included, one SV is used to capture each, which isn't productive
+excluded <- c("CRS7_7_26","CRS7_8_29")
+```
+
+```{r}
+peaks1 <- import("peaks.narrowPeak")
+bl <- import("/reference/Mus_musculus/GRCm38.blacklist.bed")
+peaks1 <- peaks1[!overlapsAny(peaks1, bl)]
+peaks1 <- keepStandardChromosomes(peaks1, pruning="coarse")
+peaks <- resize(peaks1, width = 300L, fix="center")
+
+bams <- list.files("aligned", pattern="bam$", full=TRUE)
+names(bams) <- gsub("\\.bam","",basename(bams))
+flags <- Rsamtools::scanBamFlag(isDuplicate = FALSE,
+                                isSecondaryAlignment=FALSE,
+                                isNotPassingQualityControls = FALSE)
+o <- lapply(bams, FUN=function(x){
+  gr <- as(readGAlignmentPairs(x, param = Rsamtools::ScanBamParam(flag=flags), strandMode = 0),"GRanges")
+  gr <- epiwraps:::.align2cuts(epiwraps:::.doShift(gr, c(4L,-5L)), size=1L)
+  list(peaks=countOverlaps(peaks, gr), peaks1=countOverlaps(peaks1, gr))
+})
+
+
+se <- SummarizedExperiment(list(counts=sapply(o, FUN=function(x) x$peaks)), rowRanges = peaks)
+row.names(se) <- as.character(granges(se))
+colnames(se) <- names(bams)
+
+e <- as.data.frame(read_excel("CRS7_metadata.xlsx"))
+e$Group <- factor(e$Group, c("Control","45 min"), c("Control","45min"))
+
+row.names(e) <- e[,1]
+colData(se) <- DataFrame(e[colnames(se),])
+
+ser <- se <- addGCBias(se, genome=genome)
+
+saveRDS(se, file="resizedCounts.SE.rds")
+
+se <- SummarizedExperiment(list(counts=sapply(o, FUN=function(x) x$peaks1)), rowRanges = peaks1)
+colnames(se) <- names(bams)
+row.names(se) <- as.character(granges(se))
+colData(se) <- colData(ser)
+
+se <- addGCBias(se, genome=genome)
+
+saveRDS(se, file="counts.SE.rds")
+```
+
+
+```{r}
+se <- ser[,!(colnames(ser) %in% excluded)]
+se <- se[which(rowSums(assay(se)>0)>1),]
+motifs <- readRDS("/mnt/germain/plger/DTFAB/fullFrags/BANP/runATAC_results/others/motifs.rds")
+moi <- matchMotifs(motifs, se, genome=genome)
+set.seed(123)
+register(MulticoreParam(4, progress=FALSE))
+dev <- computeDeviations(object=se[,setdiff(colnames(se), excluded)], annotations=moi,
+                         background_peaks=getBackgroundPeaks(se, niterations=2000))
+saveRDS(dev, "CVdev.SE.rds")
+```
+
+```{r}
+assays(dev)$centered <- scale(assays(dev)$z,scale=FALSE)
+tmp <- preprocessCore::normalize.quantiles(assays(dev)$z)
+dimnames(tmp) <- dimnames(assays(dev)$z)
+assays(dev)$qt <- tmp
+dev <- SEtools::svacor(dev, ~Sex+Treatment*Group, ~Sex, useVST=FALSE, assayName="qt", n.sv=1)
+dev$Group <- relevel(factor(dev$Group),"Control")
+fit <- eBayes(limma::lmFit(assays(dev)$qt, model.matrix(~SV1+Sex+Treatment*Group,data=as.data.frame(colData(dev)))))
+rowData(dev)[["DEA.stress"]] <- as.data.frame(topTable(fit, "Group45min", Inf))[row.names(dev),]
+rowData(dev)[["DEA.restraint"]] <- as.data.frame(topTable(fit, "TreatmentRestraint", Inf))[row.names(dev),]
+rowData(dev)[["DEA.interaction"]] <- as.data.frame(topTable(fit, "TreatmentRestraint:Group45min", Inf))[row.names(dev),]
+sechm::sechm(dev[,order(dev$Treatment)], c("GCR","BANP","CREB1","HTF4"), assayName="qt", gaps_at = "Group", top_annotation = c("Treatment"), breaks=1, show_colnames = TRUE)
+saveRDS(dev, "CVdev.SE.rds")
+```
+
+# Promoters
+
+```{r}
+tx <- transcripts(ensdb, columns="gene_name")
+prom200 <- promoters(tx, 200,0)
+promUp <- trim(promoters(promoters(tx, 2000,0), 0, 1800))
+w <- which(!duplicated(granges(prom200)))
+prom200 <- prom200[w]
+promUp <- promUp[w]
+names(prom200) <- names(promUp) <- paste(prom200$gene_name, start(promoters(tx[w], 1,0)), sep=".")
+o <- lapply(bams, FUN=function(x){
+  gr <- as(readGAlignmentPairs(x, param = Rsamtools::ScanBamParam(flag=flags), strandMode = 0),"GRanges")
+  gr <- epiwraps:::.align2cuts(epiwraps:::.doShift(gr, c(4L,-5L)), size=1L)
+  list(p200=countOverlaps(prom200, gr, ignore.strand=TRUE), pUp=countOverlaps(promUp, gr, ignore.strand=TRUE))
+})
+
+se <- SummarizedExperiment(list(p200=sapply(o, FUN=function(x) x$p200),
+                                pUp=sapply(o, FUN=function(x) x$pUp)))
+row.names(se) <- names(prom200)
+colnames(se) <- names(bams)
+
+e <- as.data.frame(read_excel("CRS7_metadata.xlsx"))
+e$Group <- factor(e$Group, c("Control","45 min"), c("Control","45min"))
+
+row.names(e) <- e[,1]
+colData(se) <- DataFrame(e[colnames(se),])
+
+saveRDS(se, file="promoterCounts.SE.rds")
+```
+
+
+# Peaks DA
+
+
+```{r}
+se <- readRDS("counts.SE.rds")
+se <- se[,!(colnames(se) %in% excluded)]
+se$gr <- paste(se$Sex, se$Group, se$Treatment)
+assays(se)$norm <- GCSmoothQuantile(se, bio="gr")
+se <- se[!is.na(rowData(se)$bias),]
+mode(assays(se)$norm) <- "integer"
+row.names(se) <- as.character(granges(se))
+
+se <- se[,order(se$Treatment, se$Group, se$Sex)]
+mm <- model.matrix(~Sex+Treatment*Group, data=as.data.frame(colData(se)))
+se <- se[filterByExpr(se,mm),]
+
+dds <- DGEList(assays(se)$norm)
+dds <- estimateDisp(dds, mm)
+fit <- glmFit(dds, mm)
+psex <- as.data.frame(topTags(glmLRT(fit, "SexM"), n=Inf))
+pres <- as.data.frame(topTags(glmLRT(fit, "TreatmentRestraint"), n=Inf))
+pstr <- as.data.frame(topTags(glmLRT(fit, "Group45min"), n=Inf))
+pint <- as.data.frame(topTags(glmLRT(fit, grep(":",colnames(mm),value=TRUE)), n=Inf))
+pany <- as.data.frame(topTags(glmLRT(fit, grep("Treatment|Group",colnames(mm),value=TRUE)), n=Inf))
+pint$FDR2 <- 1
+w <- which(pany[row.names(pint),"FDR"]<0.25)
+pint$FDR2[w] <- p.adjust(pint$PValue[w])
+
+rowData(se)$DEA.CRS <- pres[row.names(se),]
+rowData(se)$DEA.sex <- psex[row.names(se),]
+rowData(se)$DEA.stress <- pstr[row.names(se),]
+rowData(se)$DEA.interaction <- pint[row.names(se),]
+rowData(se)$FDR.any <- pany[row.names(se),"FDR"]
+
+# tmp <- as.data.frame(colData(se))
+# tmp$Treatment <- factor(tmp$Treatment, c("Restraint","Handling"))
+# mm <- model.matrix(~Sex+Treatment*Group, data=tmp)
+# fit <- glmFit(estimateDisp(dds, mm), mm)
+# pstr2 <- as.data.frame(topTags(glmLRT(fit, "Group45min"), n=Inf))
+
+assays(se)$logcpm <- log1p(cpm(dds))
+se <- log2FC(se, "logcpm", se$Treatment=="Handling" & se$Group=="Control")
+
+sechm(se, head(row.names(pany),300), assayName = "scaledLFC", gaps_at="Group", top_annotation=c("Treatment","Sex"))
+
+re <- epiwraps::annotateRegions(granges(se), anno=ensdb)
+rowData(se) <- cbind(rowData(se),
+                     mcols(re)[,setdiff(colnames(mcols(re)),colnames(rowData(se)))])
+
+metadata(se)$default_view <- list(
+  top_annotation=c("Group","Treatment","Sex"),
+  assay="norm")
+metadata(se)$anno_colors=list(
+  Sex=c(male="salmon",female="lightgreen"),
+  Treatment=c(Handling="lightgray", "Restraint"="blue3"))
+  
+saveRDS(se, "SE.proc.rds")
+```
+
+
+
+```{r}
+mds <- limma::plotMDS(dds, plot=FALSE, top=5000, gene.selection="common")
+ve <- mds$var.explained[1:2]
+mds <- cbind(x=mds$x, y=mds$y, as.data.frame(colData(se)))
+mdp1 <- ggplot(mds, aes(x,y,shape=Sex, colour=Group)) + geom_point(size=3) +
+    labs(x=paste0("MDS1 (",round(100*ve[1]),"% of variance)"),
+       y=paste0("MDS2 (",round(100*ve[2]),"% of variance)")) + theme_bw()
+
+
+set.seed(123)
+mds <- limma::plotMDS(dds[!(row.names(dds) %in% row.names(psex)[psex$PValue<0.05]),], plot=FALSE, top=5000, gene.selection="common")
+ve  <- mds$var.explained[1:2]
+mds <- cbind(x=mds$x, y=mds$y, as.data.frame(colData(se)))
+attr(mds, "varExplained") <- ve
+saveRDS(mds, "mds_excludingSex.rds")
+
+cols <- c(Handling="darkgray", "Restraint"="blue3")
+ve <- attr(mds,"varExplained")
+mdp2 <- ggplot(mds, aes(x,y,shape=Group, colour=Treatment)) + 
+  geom_hline(yintercept=-0.025, linetype="dashed", colour="darkgrey") + geom_point(size=3) +
+    labs(x=paste0("MDS1 (",round(100*ve[1]),"% of variance)"),
+       y=paste0("MDS2 (",round(100*ve[2]),"% of variance)")) + theme_bw() +
+  scale_colour_manual(values=cols)
+mdp2.vl <- ggplot(mds, aes(Group, y, fill=Treatment)) + geom_violin() + 
+  stat_summary(position=position_dodge2(width=0.9)) + theme_bw() +
+  labs(x="Group", y="MDS2") + scale_fill_manual(values=cols)
+
+y <- split(mds$y,paste(mds$Group, mds$Treatment))
+pv <- sapply(1:4, FUN=\(i) sapply(1:4, \(j){ if(i==j) return(NA_real_); wilcox.test(y[[i]],y[[j]])$p.value}))
+dimnames(pv) <- list(names(y),names(y))
+
+mdp2 + (mdp2.vl + theme(legend.position = "none"))+ plot_layout(widths=c(4,3))
+```
+
+Comparison with (unspliced) RNA:
+
+```{r}
+dev <- readRDS("CVdev.SE.rds")
+gr <- setNames(assays(dev)$corrected["GCR",], paste0("CRS3_v",dev$origCRS3ID))
+y <- setNames(mds$y, paste0("CRS3_v",se$origCRS3ID))
+```
+
+
+```{r}
+rna <- readRDS("../rnaDEAs/all.unspliced.SE.rds")
+rna$atac.mds.y <- y[colnames(rna)]
+rna <- rna[,rna$Experiment=="CRS3" & rna$TimePoint %in% c("0min", "45min")]
+rna$GCR <- gr[colnames(rna)]
+rna <- rna[,!is.na(rna$GCR)]
+rna <- rna[,order(rna$TimePoint, rna$Treatment, rna$GCR)]
+degs <- getDEGs(rna, "45min")
+```
+
+
+# Promoters DA
+
+
+```{r}
+se <- readRDS("promoterCounts.SE.rds")
+se <- se[,!(colnames(se) %in% excluded)]
+assays(se)$pAll <- assays(se)[[1]] + assays(se)[[2]]
+
+e <- scuttle::sumCountsAcrossFeatures(assay(se), gsub("\\..+","",row.names(se)))
+e2 <- t(sapply(split(seq_len(nrow(se)), gsub("\\..+","",row.names(se))), FUN=\(x){
+  x <- assay(se,"pAll")[x,,drop=FALSE]
+  w <- which.max(rowSums(x))
+  x[w,]
+}))
+se2 <- SummarizedExperiment(list(counts=e), colData=colData(se))
+sea <- SummarizedExperiment(list(counts=e2), colData=colData(se))
+
+SEs <- lapply(list(p200=se2, pAll=sea), FUN=function(se){
+  se <- se[,order(se$Treatment, se$Group, se$Sex)]
+  mm <- model.matrix(~Sex+Treatment*Group, data=as.data.frame(colData(se)))
+  se <- se[filterByExpr(assay(se),mm),]
+  set.seed(123)
+  se <- SEtools::svacor(se, ~Sex+Treatment*Group, n.sv = 1)
+  mm <- model.matrix(~SV1+Sex+Treatment*Group, data=as.data.frame(colData(se)))
+  dds <- calcNormFactors(DGEList(assay(se)))
+  dds <- estimateDisp(dds, mm)
+  fit <- glmFit(dds, mm)
+  psex <- as.data.frame(topTags(glmLRT(fit, "SexM"), n=Inf))
+  pres <- as.data.frame(topTags(glmLRT(fit, "TreatmentRestraint"), n=Inf))
+  pstr <- as.data.frame(topTags(glmLRT(fit, "Group45min"), n=Inf))
+  pint <- as.data.frame(topTags(glmLRT(fit, grep(":",colnames(mm),value=TRUE)), n=Inf))
+  pany <- as.data.frame(topTags(glmLRT(fit, grep("Treatment|Group",colnames(mm),value=TRUE)), n=Inf))
+  pint$FDR2 <- 1
+  w <- which(pany[row.names(pint),"FDR"]<0.25)
+  pint$FDR2[w] <- p.adjust(pint$PValue[w])
+  
+  rowData(se)$DEA.CRS <- pres[row.names(se),]
+  rowData(se)$DEA.sex <- psex[row.names(se),]
+  rowData(se)$DEA.stress <- pstr[row.names(se),]
+  rowData(se)$DEA.interaction <- pint[row.names(se),]
+  rowData(se)$FDR.any <- pany[row.names(se),"FDR"]
+
+  assays(se)$logcpm <- log1p(cpm(dds))
+  se <- log2FC(se, "logcpm", se$Treatment=="Handling" & se$Group=="Control")
+
+  metadata(se)$default_view <- list(top_annotation=c("Group","Treatment","Sex"))
+  metadata(se)$anno_colors <- list(
+    Sex=c(male="salmon",female="lightgreen"),
+    Treatment=c(Handling="lightgray", "Restraint"="blue3"),
+    Group=c("Control"="lightgray", "45min"="darkred"))
+  se
+})
+
+se2 <- SEs[[1]]
+sea <- SEs[[2]]
+saveRDS(se2, "gene.200bpPromoters.SE.rds")
+saveRDS(sea, "gene.top2kbPromoter.SE.rds")
+```
+
+```{r}
+d <- getDEA(sea, "stress")
+d$sig <- d$FDR<0.05 & abs(d$logFC)>0.1
+d$gene <- row.names(d)
+vol <- ggplot(d, aes(logFC, -log10(FDR), label=gene)) + 
+   ggrastr::geom_point_rast(size=0.5, colour="darkgrey") + 
+   geom_point(data=d[d$FDR<0.05,], size=0.5, aes(colour=sig)) + 
+   ggrepel::geom_text_repel(data=head(d[d$sig,],12), min.segment.length = 0) + 
+   scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue")) +
+   theme_bw() + theme(legend.position = "none") + coord_cartesian(xlim=c(-1.1,1.1))
+
+```
+
+
+```{r}
+sessionInfo()
+```
+

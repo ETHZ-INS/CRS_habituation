@@ -1,0 +1,238 @@
+---
+title: "Characterization of the CRS dampened genes"
+author: "Pierre-Luc Germain"
+date: "2023-07-05"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(dev="CairoPNG")
+suppressPackageStartupMessages({
+  library(sechm)
+  library(edgeR)
+  library(stageR)
+  library(ggplot2)
+})
+theme_set(theme_classic())
+source("../functions/functions.R")
+source("../functions/clusterProfiling.R")
+th.lfc <- log2(1.2)
+```
+
+# Overall
+
+```{r}
+se <- readRDS("all.full.SE.rds")
+d <- readRDS("damping.rds")
+dt <- split(d,d$TimePoint)
+for(f in names(dt)){
+  g <- intersect(getDEGs(se, f, lfc.th=th.lfc), row.names(se))
+  row.names(dt[[f]]) <- dt[[f]]$gene
+  dt[[f]] <- dt[[f]][g,]
+  dt[[f]]$category <- cut(dt[[f]]$damping, breaks=c(0,0.2,0.75,1), labels=c("low","medium","high"), include.lowest = TRUE)
+  rowData(se)[[paste0("damping",f)]] <- NA_real_
+  rowData(se)[row.names(dt[[f]]),paste0("damping",f)] <- dt[[f]]$damping
+  dt[[f]] <- dt[[f]][order(sign(dt[[f]]$logFC)*dt[[f]]$damping),]
+}
+```
+
+```{r}
+# take the most significant damping per gene
+ag1 <- d[!duplicated(d$gene),]
+row.names(ag1) <- ag1$gene
+ggplot(ag1[which(ag1$FDR<0.05 & abs(ag1$logFC)>th.lfc),], aes(damping, logFC)) + 
+  geom_hline(yintercept=0, linetype="dashed") + ggpointdensity::geom_pointdensity() +
+  scale_colour_viridis_c(guide = "none") + labs(x="Damping coefficient", y="logFC upon stress")
+```
+
+There's no relationship between the degree of damping and the strength of the response to stress.
+
+```{r}
+ag1 <- ag1[,c("gene","TimePoint","logFC","logCPM","FDR","logFC.CRS","PValue.CRS","FDR.CRS","damping")]
+names(ag1)[ncol(ag1)] <- "topDamping"
+# take the weighted mean of the damping
+ag2 <- sapply(split(d[,c("damping","PValue.CRS")], d$gene), FUN=function(x){
+  weighted.mean(x$damping, pmax(0,-log10(x$PValue.CRS)-0.3),na.rm=TRUE)
+})
+ag1$wmDamping <- ag2[row.names(ag1)]
+ag <- setNames(ag1$wmDamping, ag1$gene)
+ag <- ag[names(ag) %in% row.names(se)]
+alldegs <- union(row.names(se)[which(rowData(se)$FDR<0.05)],
+                 length(unique(unlist(getDEGs(se, lfc.th=th.lfc)))))
+adegs2 <- intersect(alldegs, names(ag))
+ag <- ag[adegs2]
+ag <- ag[!is.na(ag)]
+rowData(se)$maxDamping <- NA_real_
+rowData(se)[names(ag),"maxDamping"] <- as.numeric(ag)
+
+# # find the elbow
+# elbow <- ag[which.max(sqrt((rank(ag)/length(ag))^2+(1-ag)^2))]
+# mm <- mixtools::normalmixEM(ag, k=3)
+# dc <- c("low","medium","high")[apply(mm$posterior,1,which.max)]
+dc <- cut(ag, breaks=c(0,0.1,0.5,0.8,1), labels=c("none","low","medium","high"), include.lowest = TRUE)
+
+dampingPlot(data.frame(gene=names(ag), rank=rank(ag)/length(ag), damping=ag, category=dc),
+            goi=c("Adat3", "Apold1", "Npas4", "Fosb", "Fos", "Sgk1", "Arc", "Junb", "Dio2","Cwc25","Creb5"))
+
+rowData(se)$dampingCategory <- NA
+rowData(se)[names(ag),"dampingCategory"] <- as.character(dc)
+rowData(se)$dampingCategory <- factor(rowData(se)$dampingCategory,levels(dc))
+saveRDS(se, file="all.full.SE.rds")
+```
+
+## Damping patterns
+
+
+```{r, eval=FALSE}
+degs <- unique(unlist(lapply(getDEA(se)[1:3], FUN=getDEGs, lfc.th = th.lfc, fdr.th=0.01)))
+a <- assays(se)$scaledLFC[intersect(degs,row.names(se)),se$TimePoint %in% c("45min","1h30","3h")]
+w <- which(abs(a)>5)
+a[w] <- 5*sign(a[w])
+set.seed(42)
+res <- Spectrum::Spectrum(t(a), runrange=TRUE, krangemax = 10)
+cl <- split(row.names(a), res[[10]]$assignments)
+saveRDS(cl, file="clustering_res.rds")
+```
+
+
+```{r}
+cl <- readRDS("clustering_res.rds")
+sechm(se, cl, gaps_at="TimePoint", assayName = "scaledLFC", row_title_gp=gpar(fontsize=12), column_title_gp=gpar(fontsize=12))
+```
+
+```{r}
+gl <- list(
+  "blunted\nat 45min"=cl[["3"]],
+  "faster return\nto baseline"=unlist(cl[c("1","4")], use.names = FALSE),
+  "ablated\nat 3h"=cl[["8"]]
+  
+)
+saveRDS(gl, "full.dampingClusters.rds")
+gl.hm <- sechm(se, gl, gaps_at="TimePoint", assayName = "scaledLFC", top_annotation=c("TimePoint","Treatment"),
+               row_title_gp=gpar(fontsize=12), column_title_gp=gpar(fontsize=12),
+               row_title_rot=0, use_raster=TRUE)
+gl.hm
+```
+
+Enrichment vs all expressed genes:
+
+```{r}
+gsets <- getMsigSets()
+WP <- gsets[grep(":WIKIPATHWAYS",names(gsets))]
+regs <- readRDS("../extDat/collecTRI.regulons.rds")
+regs <- split(tools::toTitleCase(tolower(regs$target)), regs$source)
+expressed_genes <- row.names(se)[which(!is.na(rowData(se)$FDR))]
+sigs <- lapply(gl, FUN=function(x){
+  setNames(expressed_genes %in% x, expressed_genes)
+})
+gl.reg.vsall <- lapply(sigs, sets=regs, FUN=enrichmentTests)
+gl.wp.vsall <- lapply(sigs, sets=WP, FUN=enrichmentTests)
+gl.ora.vsall <- lapply(sigs, sets=gsets, FUN=enrichmentTests, alternative = "two.sided")
+
+sigTerms <- unique(unlist(lapply(gl.ora.vsall, FUN=function(x){
+  x <- x[x$FDR<0.05 & x$overlap>=5,]
+  if(sum(x$enrichment>3)<2) return(head(row.names(x)))
+  x <- x[x$enrichment>3,]
+  return(head(row.names(x)))
+})))
+ora <- dplyr::bind_rows(lapply(gl.ora.vsall, FUN=function(x){
+  x <- x[sigTerms,]
+  x$pathway <- sigTerms
+  x
+}), .id="Cluster")
+ora$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",ora$pathway)))
+ora$Cluster <- factor(ora$Cluster, names(gl)[c(3,2,1)])
+
+
+gl.enrP <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,8)) + 
+  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
+  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5),
+                       axis.title=element_blank()) + labs(fill="fold-\nenrichment")
+
+gl.enrP
+```
+
+Faster return to baseline:
+  GO:BP:GOBP_RESPONSE_TO_ABIOTIC_STIMULUS (2-fold, FDR~0.00014) and GOBP_CELLULAR_RESPONSE_TO_CORTICOSTEROID_STIMULUS (3.4-fold, FDR~0.014)
+Top CollectTRI enrichment: NR3C1 (3-fold, FDR 1e-7), followed by PPARG and HIF1A.
+
+Ablated at 3h: no enrichment
+
+Blunted at 45min: 
+orexin & corticotropin, vasculature development
+CREB1 (2.3-fold, FDR~0.00054)...
+
+
+vs response genes:
+
+```{r}
+degs <- unique(unlist(lapply(getDEA(se)[1:5], FUN=getDEGs, lfc.th = th.lfc)))
+sigs <- lapply(gl, FUN=function(x){
+  setNames(degs %in% x, degs)
+})
+gl.reg <- lapply(sigs, sets=regs, FUN=enrichmentTests)
+gl.wp <- lapply(sigs, sets=WP, FUN=enrichmentTests)
+gl.ora <- lapply(sigs, sets=gsets, FUN=enrichmentTests, alternative = "two.sided")
+sigTerms <- unique(unlist(lapply(gl.ora, FUN=function(x) head(row.names(x)[which(x$FDR<0.25)]))))
+sigTerms <- c(sigTerms, "GO:BP:GOBP_CELLULAR_RESPONSE_TO_TOXIC_SUBSTANCE") # to have one top per cluster
+ora <- dplyr::bind_rows(lapply(gl.ora, FUN=function(x){
+  x <- x[sigTerms,]
+  x$pathway <- sigTerms
+  x
+}), .id="Cluster")
+ora$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",ora$pathway)))
+ora$Cluster <- factor(ora$Cluster, names(gl)[c(3,2,1)])
+
+
+gl.enrP2 <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), colour=enrichment)) + 
+  geom_point() + scale_colour_gradient2() + scale_size_continuous(range=c(2,8)) + 
+  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5),
+                     axis.title=element_blank())
+gl.enrP2
+```
+
+```{r}
+enr <- list(
+  "vsExpressed"=list(regulons=gl.reg.vsall, WP=gl.wp.vsall, ORA=gl.ora.vsall),
+  "vsResponse"=list(regulons=gl.reg, WP=gl.wp, ORA=gl.ora)
+)
+saveRDS(enr, "dampingClusters_enrichments.rds")
+```
+
+```{r}
+gl2 <- list(
+  "(down) not damped"=cl[["5"]],
+  "(down) faster return\nto baseline"=cl[["9"]],
+  "(down) ablated\nat 3h"=c(cl[["6"]],cl[["7"]])
+)
+sigs <- lapply(gl2, FUN=function(x){
+  setNames(expressed_genes %in% x, expressed_genes)
+})
+gl.reg.vsall <- lapply(sigs, sets=regs, FUN=enrichmentTests)
+gl.wp.vsall <- lapply(sigs, sets=WP, FUN=enrichmentTests)
+gl.ora.vsall <- lapply(sigs, sets=gsets, FUN=enrichmentTests, alternative = "two.sided")
+
+sigTerms <- unique(unlist(lapply(gl.ora.vsall, FUN=function(x){
+  x <- x[x$FDR<0.05 & x$overlap>=5,]
+  if(sum(x$enrichment>3)<2) return(head(row.names(x)))
+  x <- x[x$enrichment>3,]
+  return(head(row.names(x)))
+})))
+ora <- dplyr::bind_rows(lapply(gl.ora.vsall, FUN=function(x){
+  x <- x[sigTerms,]
+  x$pathway <- sigTerms
+  x
+}), .id="Cluster")
+ora$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",ora$pathway)))
+ora$Cluster <- factor(ora$Cluster, names(gl2)[c(3,2,1)])
+
+saveRDS(ora, file="dampingClusters_enrichments.down.rds")
+
+gl.enrP <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,8)) + 
+  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
+  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5),
+                       axis.title=element_blank()) + labs(fill="fold-\nenrichment")
+```
+

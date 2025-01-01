@@ -1,0 +1,122 @@
+---
+title: "Timeline of Acute Restraint Stress (ARS)"
+author: "Pierre-Luc Germain"
+date: "2023-05-23"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(dev="CairoPNG")
+suppressPackageStartupMessages({
+  library(sechm)
+  library(edgeR)
+  library(stageR)
+  library(ggplot2)
+  library(cowplot)
+  library(patchwork)
+  library(clusterProfiler)
+})
+source("../functions/functions.R")
+source("../functions/clusterProfiling.R")
+th.lfc <- log2(1.2)
+```
+
+```{r}
+se <- readRDS("../rnaDEAs/all.full.SE.rds")
+se <- updateSEforPlots(se)
+degs <- getDEGs(getDEA(se)[1:5], lfc.th = th.lfc)
+h1 <- sechm(se, degs, gaps_at="TimePoint", assayName = "scaledLFC", row_title="All stress-responsive genes",
+            row_title_gp=gpar(fontsize=12), column_title_gp=gpar(fontsize=12), use_raster=TRUE)
+```
+
+```{r}
+names(tp) <- tp <- c("45min","1h30","3h")
+d <- dplyr::bind_rows(lapply(tp, FUN=function(p){
+  x <- getDEA(se, paste0("inter.Treatment10days.CRS.TimePoint",p))[degs,c("logFC","FDR")]
+  y <- getDEA(se, paste0("inter.Treatment20days.CRS.TimePoint",p))[degs,c("logFC","FDR")]
+  colnames(x) <- paste0(colnames(x),".10days")
+  colnames(y) <- paste0(colnames(y),".20days")
+  cbind(gene=degs,x,y)
+}), .id="TimePoint")
+d <- d[which((d$FDR.10days<0.05 & abs(d$logFC.10days)>log2(1.15)) | 
+               (d$FDR.20days<0.05 & abs(d$logFC.20days)>log2(1.15))),]
+d$TimePoint <- factor(d$TimePoint,unique(d$TimePoint))
+d$minFDR <- pmin(d$FDR.10days,d$FDR.20days)
+fdrbr <- c(0.01,0.0001,0.000001,10^-10)
+sp1 <- ggplot(d, aes(logFC.10days, logFC.20days)) + geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_abline(slope=1,intercept=0,linetype="dashed") + geom_smooth(method=MASS::rlm) +
+  geom_point(aes(alpha=-log10(minFDR))) + facet_wrap(~TimePoint, scales="free") + theme_bw() +
+  labs(x="CRS:ARS Interaction logFC (10days)", y="CRS:ARS Interaction\nlogFC (20days)", alpha="FDR") +
+  scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0))
+cortext <- paste0("cor=",round(cor(d$logFC.10days,d$logFC.20days),2))
+p3 <- ggplot(d, aes(logFC.10days, logFC.20days)) + 
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_abline(slope=1,intercept=0,linetype="dashed") + geom_smooth(method=MASS::rlm) +
+  geom_point(aes(alpha=-log10(minFDR))) + theme_bw() +
+  labs(x="CRS:ARS Interaction logFC (10days)", y="CRS:ARS Interaction\nlogFC (20days)", alpha="FDR") +
+  scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0)) +
+  annotate("text",label=cortext,y=-1,x=3,hjust=1)
+```
+
+```{r}
+crscols <- metadata(se)$anno_colors$Treatment
+crscols[1] <- "grey"
+```
+
+```{r, fig.width=4, fig.height=3}
+#g <- c("Fos", "Fosb", "Npas4", "Fkbp5")
+g <- c("Fos","Fosb","Npas4","Egr1", "Apold1","Fkbp5")
+d <- meltSE(se, g)
+d$feature <- factor(d$feature, unique(d$feature))
+dag <- aggregate(d[,"log2FC",drop=FALSE], by=d[,c("feature","Treatment","TimePoint")], FUN=median)
+
+dag <- agg4Ribb(d, "log2FC", by=c("Treatment","feature","TimePoint"), sem=TRUE)
+dag <- dag[which(!(dag$TimePoint %in% c("24h"))),]
+dag$Time <- c(0,45,90,180,240,5.5*60,24*60)[as.integer(dag$TimePoint)]
+
+pg <- ggplot(dag, aes(Time, log2FC, fill=Treatment)) +
+    geom_hline(yintercept=0, linetype="dashed", colour="grey") +
+    geom_line(aes(colour=Treatment), linewidth=1.1) + 
+    geom_point(aes(colour=Treatment), size=2.5) +
+    geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.4) +
+    facet_wrap(~feature, scales="free_y", nrow=2) +
+    labs(x="Time (min)", y="log2(fold-change)") + theme_bw() +
+    scale_y_continuous(breaks=scales::pretty_breaks(n=3)) +
+    scale_fill_manual(values=crscols, guide="none") +
+    scale_color_manual(values=crscols) +
+    theme(#legend.position = "bottom", #legend.title.position = "top",
+          axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+pg
+```
+
+
+```{r, fig.width=11, fig.height=3}
+bl <- readRDS("../rnaDEAs/baselineDEAs.rds")
+d <- dplyr::bind_rows(lapply(bl[-3], FUN=function(x){
+  x <- x[!is.na(x$PValue),]
+  cbind(gene=row.names(x), x[,-3])
+}), .id="CRS")
+d$CRS <- factor(d$CRS, c("CRS10d","CRS20d","both"), c("10 days", "20 days", "CRS (10+20 days)"))
+d$sig <- d$FDR<0.05 & abs(d$logFC)>th.lfc
+vol <- ggplot(d, aes(logFC, -log10(FDR))) + ggrastr::geom_point_rast(size=0.5, colour="darkgrey") + 
+  geom_point(data=d[d$FDR<0.05,], size=0.5, aes(colour=sig)) + 
+  scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue")) +
+  theme_bw() + theme(legend.position = "none") + facet_wrap(~CRS, nrow=1) +
+  geom_hline(yintercept = -log10(0.05), linetype="dashed") + 
+  xlim(c(-2,2.5)) + ylim(c(0,1.5))
+
+pg + vol
+```
+
+```{r, fig.width=11, fig.height=8}
+pp <- plot_grid(
+  plot_grid(plot_grid(ggdraw() + draw_image("design_CRS.png"), p3,
+                      nrow=2, scale=0.95, labels = c("A","C")),
+            grid.grabExpr(draw(h1, merge=TRUE)), nrow=1, scale=c(1,0.95), rel_widths=c(3,4), labels=c(NA,"B")),
+  plot_grid(pg, vol, labels=c("D","E"), scale=0.95, nrow=1, rel_widths = c(5,4)),
+  nrow=2, rel_heights=c(4,2.1))
+pp
+pdf("Figure2.pdf", width=11, height=8)
+pp
+dev.off()
+```

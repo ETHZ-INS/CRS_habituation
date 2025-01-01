@@ -1,0 +1,101 @@
+---
+title: "Gene activity scores"
+output: html_document
+date: "2024-10-27"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(muscat)
+})
+source("GEX_analysis/functions.R")
+```
+
+```{r}
+sce <- readRDS("../scMultiome/ATAC/sce_neuronal_gene_activity.rds")
+pb <- scuttle::sumCountsAcrossCells(sce, colData(sce)[,c("celltype","Sample","Treatment","TimePoint")])
+sce <- prepSCE(sce, "celltype", "Sample", "TimePoint")
+pb2 <- aggregateData(sce)
+pb2$TimePoint <- pb2$group_id
+
+mm <- model.matrix(~Treatment*TimePoint, data=as.data.frame(colData(pb2)))
+coefs <- c(list(stressAny=grep("TimePoint",colnames(mm)),
+                treatAny=grep("Treatment",colnames(mm))),
+           lapply(setNames(seq_len(ncol(mm))[-1],colnames(mm)[-1]), FUN=identity))
+res <- pbDS(pb2, design=mm, BPPARAM=BiocParallel::MulticoreParam(10, progress=TRUE),
+            min_cells=40, coef=coefs)
+
+names(res$table) <- gsub("TimePoint","ARS",names(res$table))
+names(res$table) <- gsub("Treatment","",names(res$table))
+names(res$table)[1:2] <- c("stressAny","treatmentAny")
+
+res2 <- dplyr::bind_rows(lapply(res$table, FUN=dplyr::bind_rows), .id="Comparison")
+for(f in c("Comparison","cluster_id")) res2[[f]] <- factor(res2[[f]])
+res2$coef <- NULL
+res2 <- res2[order(res2$p_adj.loc),]
+res2$gene <- rowData(sce)[as.integer(res2$gene),"gene_name"]
+saveRDS(res2, file="neuronal.atacGeneActivites.DEAs.rds")
+```
+
+
+```{r}
+sce <- readRDS("../scMultiome/ATAC/sce_nonNeuronal_gene_activity.rds")
+pb <- scuttle::sumCountsAcrossCells(sce, colData(sce)[,c("broadClass","Sample","Treatment","TimePoint")])
+colnames(pb) <- paste(pb$broadClass, pb$Sample, sep=".")
+row.names(pb) <- make.unique(rowData(sce)$gene_name)
+assays(pb)$logcpm <- log1p(edgeR::cpm(calcNormFactors(DGEList(assay(pb)))))
+pb <- log2FC(pb, "logcpm", pb$Treatment=="Handling" & pb$TimePoint=="Control", by=pb$broadClass)
+
+sce <- prepSCE(sce, "broadClass", "Sample", "TimePoint")
+pb2 <- aggregateData(sce)
+pb2$TimePoint <- pb2$group_id
+
+mm <- model.matrix(~Treatment*TimePoint, data=as.data.frame(colData(pb2)))
+coefs <- c(list(stressAny=grep("TimePoint",colnames(mm)),
+                treatAny=grep("Treatment",colnames(mm))),
+           lapply(setNames(seq_len(ncol(mm))[-1],colnames(mm)[-1]), FUN=identity))
+res <- pbDS(pb2, design=mm, BPPARAM=BiocParallel::MulticoreParam(10, progress=TRUE),
+            min_cells=40, coef=coefs)
+
+names(res$table) <- gsub("TimePoint","ARS",names(res$table))
+names(res$table) <- gsub("Treatment","",names(res$table))
+names(res$table)[1:2] <- c("stressAny","treatmentAny")
+
+res2 <- dplyr::bind_rows(lapply(res$table, FUN=dplyr::bind_rows), .id="Comparison")
+for(f in c("Comparison","cluster_id")) res2[[f]] <- factor(res2[[f]])
+res2$coef <- NULL
+res2 <- res2[order(res2$p_adj.loc),]
+res2$gene <- rowData(sce)[as.integer(res2$gene),"gene_name"]
+saveRDS(res2, file="nonNeuronal.atacGeneActivites.DEAs.rds")
+```
+
+```{r, fig.width=15, fig.height=12}
+res2$ihw <- res2$p_adj.loc
+celltypeVolcanos(res2)
+```
+
+```{r}
+rowData(pb) <- rowData(sce)
+pb <- pb[order(rowSums(assay(pb))),]
+pb <- pb[!duplicated(rowData(pb)$gene_name),]
+row.names(pb) <- rowData(pb)$gene_name
+colnames(pb) <- paste(pb$celltype, pb$Sample, sep=".")
+dds <- calcNormFactors(DGEList(assay(pb)))
+assays(pb)$logcpm <- log1p(cpm(dds))
+pb <- log2FC(pb, "logcpm", pb$TimePoint=="Control", by=pb$celltype)
+metadata(pb)$anno_colors <- list(TimePoint=setNames(RColorBrewer::brewer.pal(4,"Reds"), levels(pb$TimePoint)),
+                                 Treatment=c(Handling="lightgrey", Restraint="darkblue"))
+metadata(pb)$default_view <- list(top_annotation=c("TimePoint","Treatment"))
+pb$celltype <- factor(as.character(pb$celltype), sort(levels(pb$celltype)))
+saveRDS(pb, "neuronal.atacGeneActivites.PB.rds")
+```
+
+```{r, fig.width=16, fig.height=6}
+pb <- pb[,!grepl("Sema3c|Tshz3|Mossy", pb$celltype)]
+pb <- pb[,order(pb$celltype, pb$TimePoint, pb$Treatment)]
+pb$celltype2 <- gsub("\\.|/","\n", pb$celltype)
+sechm(pb, c("Fkbp5", "Btg2", "Hif3a", "Egr1", "Klf9", "Fosb"), gaps_at="celltype2", assayName = "scaledLFC")
+sechm(pb, mm, gaps_at="celltype2", assayName = "logcpm")
+```
+

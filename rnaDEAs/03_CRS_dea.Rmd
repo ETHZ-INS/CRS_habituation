@@ -1,0 +1,356 @@
+---
+title: "Impact of Chronic Restraint Stress (CRS) on the ARS response"
+author: "Pierre-Luc Germain"
+date: "2023-06-01"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup}
+knitr::opts_chunk$set(dev="CairoPNG")
+suppressPackageStartupMessages({
+  library(sechm)
+  library(edgeR)
+  library(stageR)
+  library(ggplot2)
+})
+theme_set(theme_classic())
+source("../functions/functions.R")
+source("../functions/clusterProfiling.R")
+th.lfc <- log2(1.3)
+```
+
+
+```{r}
+ars <- readRDS("ARS.SE.rds")
+crs <- readRDS("data/CRS.full.SE.rds")
+ars <- ars[,ars$TimePoint %in% unique(crs$TimePoint)]
+colData(ars) <- colData(ars)[,colnames(colData(crs))]
+assays(ars) <- assays(ars)[1]
+se <- cbind(ars,crs)
+metadata(se) <- metadata(ars)
+metadata(se)$default_view$top_annotation <- c("TimePoint","Treatment","Sex")
+se$TimePoint <- droplevels(se$TimePoint)
+set.seed(123)
+se <- SEtools::svacor(se, ~Experiment+Sex+Treatment*TimePoint, ~Experiment, n.sv=5)
+se <- log2FC(se, "corrected", se$TimePoint=="0min" & se$Treatment=="Handling", by=se$Sex, isLog=TRUE)
+```
+
+## Quick peak at the ARS response genes
+
+```{r}
+degs <- row.names(se)[rowData(se)$FDR<0.01]
+sechm(se, degs, assay="scaledLFC", gaps_at="TimePoint")
+```
+
+
+## DEA - considering both CRS regimen as distinct treatments
+
+```{r}
+dds <- calcNormFactors(DGEList(assay(se)))
+f <- paste(c("~Sex",grep("^SV[1-9]+",colnames(colData(se)), value=TRUE),"Treatment*TimePoint"), collapse="+")
+mm <- model.matrix(as.formula(f), data=as.data.frame(colData(se)))
+dds <- dds[filterByExpr(dds, mm, min.count=20),]
+dds <- estimateDisp(dds,mm)
+fit <- glmFit(dds, mm)
+```
+
+### ARS re-analysis with extra controls
+
+```{r}
+names(tp) <- tp <- unique(droplevels(se$TimePoint))[-1]
+deas2 <- lapply(tp, FUN=function(f){
+  as.data.frame(topTags(glmLRT(fit, paste0("TimePoint",f)), Inf))
+})
+for(f in names(deas2)){
+  rowData(se)[[paste0("DEA.",f)]] <- deas2[[f]][row.names(se),]
+  attr(rowData(se)[[paste0("DEA.",f)]], "description") <- 
+    paste("ARS transcriptomic changes at", f, "(merged analysis)")
+}
+```
+
+
+### Differences at baseline
+
+```{r}
+res10 <- as.data.frame(topTags(glmLRT(fit, c("Treatment10days CRS")), Inf))
+res20 <- as.data.frame(topTags(glmLRT(fit, c("Treatment20days CRS")), Inf))
+resEither <- as.data.frame(topTags(glmLRT(fit, c("Treatment10days CRS", "Treatment20days CRS")), Inf))
+
+sechm(se[,se$TimePoint=="0min"], head(row.names(resEither)), assay="corrected", 
+      do.scale=TRUE, gaps_at="Treatment", top_annotation=c("Treatment","Sex"))
+head(resEither)
+```
+
+Nothing significant, Glul is the only candidate that's consistent between the two treatments (but stronger in the shorter CRS).
+
+### Interactions with acute stress
+
+```{r}
+screen <- as.data.frame(topTags(glmLRT(fit, grep("Treatment|TimePoint",colnames(mm),value=TRUE)), Inf))
+se <- stagedInteractions(se, screen, fullFit=fit, coefs=grep(":",colnames(mm),value=TRUE))
+deas <- getDEA(se)
+crsInt <- unique(unlist(lapply(deas[grep("^inter\\.Treatment",names(deas))], FUN=function(x)
+                          row.names(x)[which(x$FDR<0.05 & abs(x$logFC)>th.lfc)])))
+
+sechm(se, crsInt, assay="scaledLFC", gaps_at="TimePoint",
+      top_annotation=c("TimePoint","Treatment","Sex"))
+```
+
+
+```{r}
+crsInt <- lapply(tp, FUN=function(tp){
+  x1 <- deas[[paste0("inter.Treatment10days.CRS.TimePoint",tp)]]
+  x2 <- deas[[paste0("inter.Treatment20days.CRS.TimePoint",tp)]]
+  m <- deas[[as.character(tp)]]
+  m <- m[!is.na(m[,1]),]
+  x <- merge(x1,x2,by="row.names",suffix=c(".10days",".20days"), all=TRUE)
+  row.names(x) <- x[,1]
+  m <- cbind(m, x[row.names(m),grep("logFC|PValue|FDR",colnames(x))])
+  m$mean.CRSlogFC <- (m$logFC.10days + m$logFC.20days)/2
+  m$type <- c("00"="downAmplified","01"="downDampened","10"="upDampened","11"="upAmplified")[ paste0(as.integer(m$logFC>0), as.integer(m$mean.CRSlogFC>0))]
+  m$type[which(m$PValue>0.05 & abs(m$logFC)<abs(m$mean.CRSlogFC)/2)] <- "novel"
+  m$type[which(sign(m$logFC.10days)!=sign(m$logFC.20days) | m$PValue.10days>0.1 | m$PValue.20days>0.1)] <- "discordant"
+  m$type[which( !(m$FDR.10days<0.05 & abs(m$logFC.10days)>th.lfc/2) &
+                 !(m$FDR.20days<0.05 & abs(m$logFC.20days)>th.lfc/2))] <- "not significant"
+  m$type[which(is.na(m$FDR.10days) & is.na(m$FDR.20days))] <- "not significant"
+  m$type[which(!(m$type %in% c("novel","discordant")) & (abs(m$logFC)<th.lfc | m$FDR>0.05))] <- "not significant"
+  m$gene <- row.names(m)
+  m
+})
+```
+
+To have an idea of how the effects of both lengths of CRS treatment (on the ARS response) are comparable, we compare the logFC of the interactions terms that are significant in either treatment (across any timepoints):
+
+```{r}
+d <- dplyr::bind_rows(crsInt, .id="TimePoint")
+d$mean.CRSFDR <- -(log10(d$FDR.10days)+log10(d$FDR.20days))/2
+d$minFDR <- pmin(d$FDR.10days,d$FDR.20days)
+d$CRSdiff <- abs(d$logFC.10days-d$logFC.20days)
+d$discordant <- d$type=="discordant" & d$CRSdiff>1 & d$CRSdiff>(d$mean.CRSlogFC)/2
+d2 <- d[which(d$FDR.10days<0.05 | d$FDR.20days<0.05),]
+ilfcc <- cor(d2$logFC.10days, d2$logFC.20days)
+fdrbr <- c(0.01,0.0001,0.000001,10^-10)
+ggplot(d2, aes(logFC.10days, logFC.20days)) + 
+  geom_hline(yintercept=0, linetype="dashed") + geom_vline(xintercept=0, linetype="dashed") + 
+  geom_abline(slope=1) + geom_point(aes(alpha=-log10(minFDR))) + 
+  ggrepel::geom_text_repel(data=d[which(d$discordant),], aes(label=gene), min.segment.length = 0) +
+  labs(x="10days Interaction logFC", y="20days Interaction logFC", alpha="min\nFDR") +
+  annotate("label", x=3, y=-7, label=paste0(paste0("R=",round(ilfcc,2)))) +
+  scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0))
+
+```
+
+Despite the small interaction foldchanges, there is an excellent overall correlation (`r round(ilfcc,2)`), indicating that 10days and 20days of CRS have very similar effects, and that those effects are highly reproducible.
+The points that are away from the diagonal tend to have a higher FDR, suggesting that the divergence between conditions is likely to be due to variability.
+Have a closer look at the candidates most strongly diverging confirms this:
+
+```{r}
+ggplot(meltSE(se, c("Ccr2","Gdf1","Hmcn2","Plag2g2d", "Il11ra2")), aes(TimePoint, log2FC, fill=Treatment)) +
+  geom_boxplot() + facet_wrap(~feature, scales = "free_y")
+```
+
+Beside Il11ra2, which does seem to be downregulated at 45min ARS only in the 10days treatment, the high variability precludes from making any claim of a difference. Even for that gene, the small foldchange and lack of a continued trend across timepoints argues against the relevance of the observation.
+
+In light of this, we proceed to analyze both treatment together to gain power.
+
+## Treating both CRS treatments together
+
+```{r}
+se$CRS <- se$Treatment!="Handling"
+dds <- calcNormFactors(DGEList(assay(se)))
+f <- paste(c("~Sex",grep("^SV[1-9]+",colnames(colData(se)), value=TRUE),"CRS*TimePoint"), collapse="+")
+mm <- model.matrix(as.formula(f), data=as.data.frame(colData(se)))
+dds <- dds[filterByExpr(dds, mm, min.count=20),]
+dds <- estimateDisp(dds,mm)
+fit <- glmFit(dds, mm)
+```
+
+
+### ARS re-analysis with extra controls
+
+```{r}
+names(tp) <- tp <- unique(droplevels(se$TimePoint))[-1]
+deas2 <- lapply(tp, FUN=function(f){
+  as.data.frame(topTags(glmLRT(fit, paste0("TimePoint",f)), Inf))
+})
+for(f in names(deas2)){
+  rowData(se)[[paste0("DEA.",f)]] <- deas2[[f]][row.names(se),]
+  attr(rowData(se)[[paste0("DEA.",f)]], "description") <- 
+    paste("ARS transcriptomic changes at", f, "(merged analysis)")
+}
+res <- as.data.frame(topTags(glmLRT(fit, grep("^TimePoint",colnames(mm),value=TRUE)), Inf))
+rowData(se)$FDR <- res[row.names(se),"FDR"]
+```
+
+
+### Differences at baseline
+
+```{r}
+res <- as.data.frame(topTags(glmLRT(fit, c("CRSTRUE")), Inf))
+saveRDS(list(CRS10d=res10, CRS20d=res20, any=resEither, both=res), file="baselineDEAs.rds")
+rowData(se)$DEA.CRS.baseline <- res[row.names(se),]
+attr(rowData(se)$DEA.CRS.baseline, "description") <- 
+  "CRS transcriptomic changes at baseline (merged analysis)"
+head(res)
+```
+
+Again nothing significant here.
+
+### Interactions with acute stress
+
+```{r}
+screen <- as.data.frame(topTags(glmLRT(fit, grep("CRS|TimePoint",colnames(mm),value=TRUE)), Inf))
+se <- stagedInteractions(se, screen, fullFit=fit, coefs=grep(":",colnames(mm),value=TRUE))
+deas <- getDEA(se)
+crsInt <- unique(unlist(lapply(deas[grep("^inter\\.CRS",names(deas))], FUN=function(x)
+                          row.names(x)[which(x$FDR<0.05 & abs(x$logFC)>th.lfc)])))
+sechm(se, crsInt, assay="scaledLFC", gaps_at="TimePoint",
+      top_annotation=c("TimePoint","Treatment","Sex"))
+```
+
+Again the overall picture is chiefly one of damping.
+
+```{r}
+crsInt <- lapply(tp, FUN=function(tp){
+  x <- deas[[paste0("inter.CRSTRUE.TimePoint",tp)]]
+  colnames(x) <- paste0(colnames(x),".CRS")
+  m <- deas[[as.character(tp)]]
+  m <- m[!is.na(m[,1]),]
+  m <- cbind(m, x[row.names(m),grep("logFC|PValue|FDR",colnames(x))])
+  m$type <- c("00"="downAmplified","01"="downDampened","10"="upDampened","11"="upAmplified")[ paste0(as.integer(m$logFC>0), as.integer(m$logFC.CRS>0))]
+  m$type[which(m$PValue>0.05 & abs(m$logFC)<abs(m$logFC.CRS)/2)] <- "novel"
+  m$type[which(!(m$FDR.CRS<0.05 & abs(m$logFC.CRS)>th.lfc/2))] <- "not significant"
+  m$type[which(is.na(m$FDR.CRS))] <- "not significant"
+  m$type[which(m$type=="novel" & !(abs(m$logFC)<th.lfc & m$FDR<0.05))] <- "not significant"
+  m$type[which(abs(m$logFC)>th.lfc & m$FDR<0.05 & abs(m$logFC.CRS)<0.15 & abs(m$logFC.CRS)<abs(m$logFC)/5 & abs(m$PValue.CRS>0.01))] <- "unaffected"
+  m$gene <- row.names(m)
+  m
+})
+d <- dplyr::bind_rows(crsInt, .id="TimePoint")
+sp <- lapply(split(d$gene,d$type), unique)
+table(d$type)
+```
+
+All significant genes fit the 'dampening' pattern.
+
+```{r}
+dampened <- unique(unlist(sp[grep("Dampened",names(sp))]))
+sechm(se, dampened, assay="scaledLFC", gaps_at="TimePoint", row_title=paste0("Dampened genes (n=",length(dampened),")"))
+```
+
+
+Even the genes that appear unaffected at a given timepoint actually tend to show dampening later on:
+
+```{r}
+adegs <- getDEGs(deas[1:5], lfc.th = th.lfc)
+sechm(se, sp$unaffected, assay="scaledLFC", gaps_at="TimePoint", row_title=paste0("Unaffected response (n=",length(sp$unaffected),")\n(at any timepoint)"))
+```
+
+A compelling hypothesis, then, is that part of the response is the same at the beginning, while another part is dampened already at the beginning, and that this early damping is responsible for the later damping of the unaffected early response.
+
+Let's try to split these two groups of genes:
+
+```{r}
+unaffected45 <- d$gene[d$TimePoint=="45min" & grepl("unaffected",d$type) & d$FDR<0.05]
+unaffected90 <- d$gene[d$TimePoint=="1h30" & grepl("unaffected",d$type) & d$FDR<0.05]
+normalStart <- union(unaffected45, unaffected90)
+dampenedStart <- intersect(setdiff(dampened,normalStart),row.names(se))
+rowData(se)$CRSonStart <- NA_character_
+rowData(se)[normalStart,"CRSonStart"] <- "normal"
+rowData(se)[dampenedStart,"CRSonStart"] <- "dampened"
+
+sechm(se, normalStart, assay="scaledLFC", gaps_at="TimePoint", row_title=paste0("Unaffected onset (n=",length(normalStart),")"))
+sechm(se, dampenedStart, assay="scaledLFC", gaps_at="TimePoint", row_title=paste0("Dampened onset (n=",length(dampenedStart),")"))
+```
+
+
+
+We calculate a damping coefficient:
+
+```{r}
+# equivalent to the linear proportion of foldchange being suppressed
+# d$damping1 <- abs(2^d$logFC.CRS-1) 
+d$damping <- ifelse(d$logFC>0,
+                    1-(exp(d$logFC+d$logFC.CRS)-1)/(exp(d$logFC)-1),
+                    1-(exp(-(d$logFC+d$logFC.CRS))-1)/(exp(-d$logFC)-1))
+d$damping <- pmax(pmin(d$damping,1),0)
+d$damping[which(d$FDR>0.5)] <- NA
+ggplot(d[d$FDR<0.05,], aes(damping)) + geom_histogram(bins=50) + 
+  facet_wrap(~type, scales="free_y") + xlab("Damping coefficient")
+
+d <- d[order(d$gene, d$PValue.CRS),]
+saveRDS(d, file="damping.rds")
+saveRDS(se, file="all.full.SE.rds")
+```
+
+
+
+
+# Sex differences
+
+```{r}
+se <- readRDS("all.full.SE.rds")
+dds <- calcNormFactors(DGEList(assay(se)))
+M <- dds[,se$Sex=="male"]
+Fe <- dds[,se$Sex=="female"]
+getFit <- function(dds, CD, f=NULL){
+  if(is.null(f)) f <- paste(c("~",grep("^SV[1-9]+", colnames(CD), value=TRUE),"CRS*TimePoint"), collapse="+")
+  mm <- model.matrix(as.formula(f), data=as.data.frame(CD))
+  dds <- dds[filterByExpr(dds, mm, min.count=20),]
+  dds <- estimateDisp(dds,mm)
+  glmFit(dds, mm)
+}
+M <- getFit(M, colData(se)[colnames(M),])
+Fe <- getFit(Fe, colData(se)[colnames(Fe),])
+fit <- getFit(dds,colData(se), f=paste(c("~",grep("^SV[1-9]+", colnames(CD), value=TRUE),"Sex*CRS*TimePoint"), collapse="+"))
+i <- intersect(row.names(M),row.names(Fe))
+names(tps) <- tps <- c("45min","1h30","3h")
+res <- dplyr::bind_rows(lapply(tps, FUN=function(x){
+  m <- as.data.frame(topTags(glmLRT(M, paste0(c("CRSTRUE:TimePoint","TimePoint"),x)), Inf))[i,]
+  m1 <- as.data.frame(topTags(glmLRT(M, paste0("CRSTRUE:TimePoint",x)), Inf))[i,]
+  w <- which(m$FDR<0.05)
+  m1$FDR2 <- 1
+  m1$FDR2[w] <- p.adjust(m1$PValue[w])
+  f <- as.data.frame(topTags(glmLRT(Fe, paste0(c("CRSTRUE:TimePoint","TimePoint"),x)), Inf))[i,]
+  f1 <- as.data.frame(topTags(glmLRT(Fe, paste0("CRSTRUE:TimePoint",x)), Inf))[i,]
+  w <- which(f$FDR<0.05)
+  f1$FDR2 <- 1
+  f1$FDR2[w] <- p.adjust(f1$PValue[w])
+  m <- merge(m1, f1, by="row.names", suffix=c(".m",".f"))
+  tmp <- getDEA(se, paste0("inter.CRSTRUE.TimePoint",x))[i,]
+  m$FDR <- tmp$FDR
+  m$logFC <- tmp$logFC
+  m$diff.sig <- as.data.frame(topTags(glmLRT(fit, paste0("Sexmale:CRSTRUE:TimePoint",x)), Inf))[i,"FDR"]
+  m$ARS.logFC <- as.data.frame(topTags(glmLRT(fit, paste0("TimePoint",x)), Inf))[i,"logFC"]
+  m
+}), .id="TimePoint")
+res2 <- res[which(res$FDR2.f<0.05 | res$FDR2.m<0.05 | res$FDR<0.05),]
+res2$minFDR <- pmin(res2$FDR.f,res2$FDR.m)
+saveRDS(res2, file="sex.CRSlfc.rds")
+res2 <- dplyr::bind_rows(lapply(split(res2,res2$TimePoint), FUN=function(x){ x$rank <- rank(x$logFC.f); x}))
+res2$TimePoint <- factor(res2$TimePoint,levels(se$TimePoint))
+pl <- ggplot(res2, aes(rank, logFC.m, alpha=-log10(minFDR))) + geom_point(colour="red") +
+  geom_point(aes(y=logFC.f), colour="blue") + facet_wrap(~TimePoint,nrow=1, scale="free_x") +
+  labs(y="CRS:ARS interaction logFC") + theme(legend.position = "none")
+```
+
+```{r, fig.width=10, fig.height=7}
+cortext <- cor.test(res2$logFC.m,res2$logFC.f,use="pairwise")
+cortext <- paste0("cor=",round(cortext$estimate,2),"\n",
+                  "p=",format(cortext$p.value, digits=2))
+p3 <- ggplot(res2, aes(logFC.m, logFC.f)) + 
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_abline(slope=1,intercept=0,linetype="dashed") + geom_smooth(method=MASS::rlm) +
+  geom_point(aes(alpha=-log10(minFDR), colour=factor(sign(ARS.logFC)))) + theme_bw() +
+  labs(x="CRS interaction logFC in males", y="CRS interaction logFC in females", alpha="FDR", colour="Direction\nupon ARS") +
+  ggrepel::geom_text_repel(data=res2[abs(res2$logFC.m-res2$logFC.f)>2,], aes(label=Row.names), alpha=1) +
+  #scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0)) +
+  annotate("text",label=cortext,y=6,x=-6,hjust=0)
+
+tmp <- ggplot(meltSE(se, gg, rowDat.columns = NA), aes(TimePoint, corrected, fill=CRS)) + geom_boxplot() + facet_grid(feature~Sex, scales="free_y")
+table(sign(res2$logFC.m)==sign(res2$logFC.f))
+plot_grid(plot_grid(p3,tmp,labels="AUTO",nrow=1), pl, nrow=2, labels=c(NA, "C"), rel_heights = c(3,2))
+```
+

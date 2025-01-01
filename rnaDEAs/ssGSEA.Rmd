@@ -1,0 +1,50 @@
+---
+title: "ssGSEA"
+output: html_document
+date: "2024-11-25"
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(sechm)
+  library(GSVA)
+  library(fgsea)
+  library(msigdbr)
+  library(BiocParallel)
+  library(limma)
+})
+source("../functions/functions.R")
+```
+
+```{r}
+sets <- getMsigSets()
+se <- readRDS("all.full.SE.rds")
+se <- se[,se$Treatment=="Handling"]
+
+gsvaPar <- gsvaParam(assays(se)$scaledLFC[which(!is.na(rowData(se)$FDR)),], sets, minSize=5, maxSize=2000)
+res <- gsva(gsvaPar, BPPARAM=MulticoreParam(10, progress=TRUE), verbose=FALSE)
+se2 <- SummarizedExperiment(list(gsva=res), colData=colData(se))
+#mm <- model.matrix(~Sex+TimePoint*Treatment, data=as.data.frame(colData(se)))
+mm <- model.matrix(~Sex+TimePoint, data=as.data.frame(colData(se)))
+fit <- eBayes(lmFit(res,mm))
+for(co in colnames(mm)[-1:-2]){
+  da <- as.data.frame(topTable(fit, co, Inf))
+  rowData(se2)[[paste0("DEA.",co)]] <- da[row.names(se2),]
+}
+da <- as.data.frame(topTable(fit, grep("^TimePoint", colnames(mm), value=TRUE), Inf))
+rowData(se2)$FDR <- da[row.names(se2),ncol(da)]
+metadata(se2) <- metadata(se)
+saveRDS(se2, "GSVA.SE.rds")
+```
+
+```{r}
+sig <- unique(unlist(lapply(levels(se2$TimePoint)[-1], FUN=function(x){
+  x <- getDEA(se2, paste0("TimePoint",x), homogenize = TRUE)
+  row.names(x)[which(x$FDR<0.001 & x$logFC>log2(1.3))]
+})))
+```
+
+```{r}
+sechm(se2, sig, gaps_at="TimePoint", row_names_gp=gpar(fontsize=8))
+```
+

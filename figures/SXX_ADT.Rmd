@@ -1,0 +1,47 @@
+---
+title: 'Supplementary Figure comparing ADT to neuroestimator'
+output: html_document
+date: "2024-10-27"
+---
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(RColorBrewer)
+  library(scater)
+})
+theme_set(theme_bw())
+source("../scMultiome/GEX_analysis/functions.R")
+source("../functions/functions.R")
+cols <- c("Handling +ARS"="darkgrey", "CRS +ARS"="#0000CD96")
+```
+
+
+```{r, fig.width=10, fig.height=10}
+sce <- readRDS("../scMultiome/GEX_analysis/neuronal.SCE.rds")
+sce <- sce[,which(sce$log10sum>3.5 & sce$contamination<0.25)]
+deas <- readRDS("../scMultiome/GEX_analysis/neuronal.DEA.rds")
+pb <- readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds")
+
+sce$activity2 <- (pmin(pmax(0,sce$activity),1))
+sce$neuroestimator2 <- qtScale(sce$neuroestimator, c(0,1), by = sce$celltype)
+met <- c(activity2=0.5, neuroestimator=0.6)
+d2 <- dplyr::bind_rows(lapply(setNames(names(met),names(met)), FUN=function(n){
+  aggregate(sce[[n]], by=as.data.frame(colData(sce)[,c("Sample","TimePoint","Treatment","celltype2")]), FUN=function(x) sum(x>met[[n]], na.rm=TRUE)/length(x))
+}), .id="method")
+d2 <- d2[!grepl("CR|Ccn2|Fn1",d2$celltype2),]
+d2$method <- gsub("activity2","ADT",d2$method)
+d2$Treatment <- factor(d2$Treatment)
+levels(d2$Treatment) <- names(cols)
+pdf("SXX_ADT.pdf", width=10, height=10)
+ggplot(d2, aes(TimePoint, x, fill=Treatment)) + geom_boxplot() +
+    stat_summary(fun=mean, geom="line", aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment), linewidth=1.2)  + 
+    theme_bw() + labs(y="Proportion of neurons activated") + ylim(0,NA) +
+  scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+        legend.position=c(1, 0), legend.justification=c(2, 0)) +
+  facet_wrap(~celltype2+method, ncol=8)
+```
