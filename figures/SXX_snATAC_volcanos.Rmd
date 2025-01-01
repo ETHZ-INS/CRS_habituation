@@ -1,0 +1,60 @@
+---
+title: "Supp - snATAC volcanos"
+output: html_document
+date: "2024-11-28"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(patchwork)
+  library(ggplot2)
+  library(ggrastr)
+})
+```
+
+```{r, fig.width=15, fig.height=20}
+ne <- readRDS("../scMultiome/ATAC/da_sva_neuronal_crs.rds")
+nn <- readRDS("../scMultiome/ATAC/da_sva_non_neuronal_crs.rds")
+dea <- dplyr::bind_rows(list(Neuronal=ne, nonNeuronal=nn), .id="Class")
+dea <- as.data.frame(dea[!grepl("Any|Restraint",dea$coef) & !grepl("PVM|CR|cycling|other",dea$celltype),])
+dea$coef <- as.factor(dea$coef)
+levels(dea$coef) <- gsub("group_id","ARS",levels(dea$coef))
+dea$coef <- factor(dea$coef, c("ARS15min","ARS45min","ARS3h"))
+dea2 <- dplyr::bind_rows(lapply(split(dea, paste(dea$coef,dea$celltype)), FUN=function(x){
+  x <- x[which(x$table.PValue.x<0.05),]
+  x[head(order(x$table.PValue.x),5),]
+}))
+(p <- ggplot(dea, aes(table.logFC, -log10(table.FDR.x), colour=table.FDR.x<0.05)) + geom_point_rast(size=1) + 
+  facet_wrap(~celltype+coef, nrow=9, dir="v") + theme_bw() +
+    scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue")) +
+  labs(color="significant", y="-log10(FDR)") + coord_cartesian(xlim=c(-4,4)) +
+    theme(legend.position="bottom"))
+```
+
+
+
+```{r, fig.width=15, fig.height=20}
+dev <- readRDS("../scMultiome/ATAC/celltype_cvDevs_neuronal.rds")
+mores <- as.data.frame(readRDS("../scMultiome/ATAC/tt_neuronal_crs_qnorm.rds"))
+tmp <- as.data.frame(readRDS("../scMultiome/ATAC/tt_non_neuronal_crs_qnorm.rds"))
+mores <- dplyr::bind_rows(list(Neuronal=mores, nonNeuronal=tmp), .id="Class")
+mores$celltype <- gsub("_.+","",mores$B)
+lvls <- unlist(lapply(split(mores$celltype,mores$Class), FUN=function(x) sort(unique(x))))
+mores$celltype <- factor(mores$celltype, lvls)
+mores <- mores[!grepl("Any|Restraint",mores$coef) & !grepl("PVM|CR|Mossy|Ccn2|cycling|vascular|other",mores$celltype),]
+mores$coef <- as.factor(mores$coef)
+levels(mores$coef) <- gsub("group_id","ARS",levels(mores$coef))
+mores$coef <- factor(mores$coef, c("ARS15min","ARS45min","ARS3h"))
+mores2 <- dplyr::bind_rows(lapply(split(mores, paste(mores$coef,mores$celltype)), FUN=function(x){
+  x <- x[which(x$adj.P.Val.x<0.05),]
+  x[head(order(x$P.Value.x),5),]
+}))
+(p <- ggplot(mores, aes(logFC, -log10(adj.P.Val.x), colour=adj.P.Val.x<0.05)) + geom_point_rast(size=1) + 
+  ggrepel::geom_text_repel(data=mores2, aes(label=rn), size=3, min.segment.length = 0, color="black") +
+  facet_wrap(~celltype+coef, nrow=9, dir="h") + theme_bw() +
+    scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue")) +
+  labs(color="significant", y="-log10(FDR)") + #coord_cartesian(xlim=c(-4,4)) +
+    theme(legend.position="bottom"))
+
+```
+

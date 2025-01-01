@@ -1,0 +1,200 @@
+---
+title: "Impact of Chronic Restraint Stress (CRS) on the ARS response in unspliced RNA"
+author: "Pierre-Luc Germain"
+date: "2023-07-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup}
+knitr::opts_chunk$set(dev="CairoPNG")
+suppressPackageStartupMessages({
+  library(sechm)
+  library(edgeR)
+  library(stageR)
+  library(ggplot2)
+})
+theme_set(theme_classic())
+source("../functions/functions.R")
+source("../functions/clusterProfiling.R")
+th.lfc <- log2(1.3)
+```
+
+```{r}
+se <- readRDS("all.full.SE.rds")
+cd <- colData(se)
+crs <- readRDS("data/CRS.unspliced.SE.rds")
+ars <- readRDS("data/ARS.unspliced.SE.rds")
+colData(ars) <- colData(ars)[,colnames(colData(crs))]
+se <- cbind(ars,crs)
+colData(se) <- cd[colnames(se),]
+metadata(se) <- metadata(ars)
+metadata(se)$default_view$top_annotation <- c("TimePoint","Treatment","Sex")
+se$TimePoint <- droplevels(se$TimePoint)
+se <- se[,order(se$TimePoint, se$Treatment, se$Sex)]
+set.seed(123)
+se <- SEtools::svacor(se, ~Experiment+Sex+Treatment*TimePoint, ~Experiment, n.sv=5)
+se <- log2FC(se, "corrected", se$TimePoint=="0min" & se$Treatment=="Handling", by=se$Sex, isLog=TRUE)
+```
+
+
+### ARS analysis
+
+```{r}
+dds <- calcNormFactors(DGEList(assay(se)))
+f <- paste(c("~Sex",grep("^SV[1-9]+",colnames(colData(se)), value=TRUE),"CRS*TimePoint"), collapse="+")
+mm <- model.matrix(as.formula(f), data=as.data.frame(colData(se)))
+dds <- dds[filterByExpr(dds, mm, min.count=20),]
+dds <- estimateDisp(dds,mm)
+fit <- glmFit(dds, mm)
+```
+
+```{r}
+names(tp) <- tp <- unique(droplevels(se$TimePoint))[-1]
+deas2 <- lapply(tp, FUN=function(f){
+  as.data.frame(topTags(glmLRT(fit, paste0("TimePoint",f)), Inf))
+})
+for(f in names(deas2)){
+  rowData(se)[[paste0("DEA.",f)]] <- deas2[[f]][row.names(se),]
+  attr(rowData(se)[[paste0("DEA.",f)]], "description") <- 
+    paste("ARS transcriptomic changes at", f, "(merged analysis)")
+}
+res <- as.data.frame(topTags(glmLRT(fit, grep("^TimePoint",colnames(mm),value=TRUE)), Inf))
+rowData(se)$FDR <- res[row.names(se),"FDR"]
+```
+
+
+### Differences at baseline
+
+```{r}
+res <- as.data.frame(topTags(glmLRT(fit, c("CRSTRUE")), Inf))
+rowData(se)$DEA.CRS.baseline <- res[row.names(se),]
+attr(rowData(se)$DEA.CRS.baseline, "description") <- 
+  "CRS transcriptomic changes at baseline (merged analysis)"
+head(res)
+```
+
+### Interactions with acute stress
+
+```{r}
+screen <- as.data.frame(topTags(glmLRT(fit, grep("CRS|TimePoint",colnames(mm),value=TRUE)), Inf))
+se <- stagedInteractions(se, screen, fullFit=fit, coefs=grep(":",colnames(mm),value=TRUE))
+deas <- getDEA(se)
+crsInt <- unique(unlist(lapply(deas[grep("^inter\\.CRS",names(deas))], FUN=function(x)
+                          row.names(x)[which(x$FDR<0.05 & abs(x$logFC)>th.lfc)])))
+sechm(se, crsInt, assay="scaledLFC", gaps_at="TimePoint",
+      top_annotation=c("TimePoint","Treatment","Sex"))
+```
+
+```{r}
+crsInt <- lapply(tp, FUN=function(tp){
+  x <- deas[[paste0("inter.CRSTRUE.TimePoint",tp)]]
+  colnames(x) <- paste0(colnames(x),".CRS")
+  m <- deas[[as.character(tp)]]
+  m <- m[!is.na(m[,1]),]
+  m <- cbind(m, x[row.names(m),grep("logFC|PValue|FDR",colnames(x))])
+  m$type <- c("00"="downAmplified","01"="downDampened","10"="upDampened","11"="upAmplified")[ paste0(as.integer(m$logFC>0), as.integer(m$logFC.CRS>0))]
+  m$type[which(m$PValue>0.05 & abs(m$logFC)<abs(m$logFC.CRS)/2)] <- "novel"
+  m$type[which(!(m$FDR.CRS<0.05 & abs(m$logFC.CRS)>th.lfc/2))] <- "not significant"
+  m$type[which(is.na(m$FDR.CRS))] <- "not significant"
+  m$type[which(m$type=="novel" & !(abs(m$logFC)<th.lfc & m$FDR<0.05))] <- "not significant"
+  m$type[which(abs(m$logFC)>th.lfc & m$FDR<0.05 & abs(m$logFC.CRS)<0.15 & abs(m$logFC.CRS)<abs(m$logFC)/5 & abs(m$PValue.CRS>0.01))] <- "unaffected"
+  m$gene <- row.names(m)
+  m
+})
+d <- dplyr::bind_rows(crsInt, .id="TimePoint")
+sp <- lapply(split(d$gene,d$type), unique)
+table(d$type)
+```
+
+All significant genes fit the 'dampening' pattern.
+
+```{r}
+dampened <- unique(unlist(sp[grep("Dampened",names(sp))]))
+sechm(se, dampened, assay="scaledLFC", gaps_at="TimePoint", row_title=paste0("Dampened genes\n(n=",length(dampened),")")) %v% 
+sechm(se, sp$unaffected, assay="scaledLFC", gaps_at="TimePoint", top_annotation = NA, row_title=paste0("Unaffected genes\n(n=",length(sp$unaffected),")"))
+```
+
+
+
+```{r}
+adegs <- getDEGs(deas[1:5], lfc.th = th.lfc)
+unaffected45 <- d$gene[d$TimePoint=="45min" & grepl("unaffected",d$type) & d$FDR<0.05]
+unaffected90 <- d$gene[d$TimePoint=="1h30" & grepl("unaffected",d$type) & d$FDR<0.05]
+normalStart <- union(unaffected45, unaffected90)
+dampenedStart <- intersect(setdiff(dampened,normalStart),row.names(se))
+rowData(se)$CRSonStart <- NA_character_
+rowData(se)[intersect(normalStart,row.names(se)),"CRSonStart"] <- "normal"
+rowData(se)[intersect(dampenedStart,row.names(se)),"CRSonStart"] <- "dampened"
+
+sechm(se, normalStart, assay="scaledLFC", gaps_at="TimePoint", row_title=paste0("Unaffected onset (n=",length(normalStart),")"))
+sechm(se, dampenedStart, assay="scaledLFC", gaps_at="TimePoint", row_title=paste0("Dampened onset (n=",length(dampenedStart),")"))
+```
+
+
+We calculate a damping coefficient:
+
+```{r}
+# equivalent to the linear proportion of foldchange being suppressed
+# d$damping1 <- abs(2^d$logFC.CRS-1) 
+d$damping <- ifelse(d$logFC>0,
+                    1-(exp(d$logFC+d$logFC.CRS)-1)/(exp(d$logFC)-1),
+                    1-(exp(-(d$logFC+d$logFC.CRS))-1)/(exp(-d$logFC)-1))
+d$damping <- pmax(pmin(d$damping,1),0)
+d$damping[which(d$FDR>0.5)] <- NA
+ggplot(d[d$FDR<0.05,], aes(damping)) + geom_histogram(bins=50) + 
+  facet_wrap(~type, scales="free_y") + xlab("Damping coefficient")
+
+d <- d[order(d$gene, d$PValue.CRS),]
+saveRDS(d, file="unspliced_damping.rds")
+```
+
+
+```{r}
+dt <- split(d,d$TimePoint)
+for(f in names(dt)){
+  g <- intersect(getDEGs(se, f, lfc.th=th.lfc), row.names(se))
+  row.names(dt[[f]]) <- dt[[f]]$gene
+  dt[[f]] <- dt[[f]][g,]
+  dt[[f]]$category <- cut(dt[[f]]$damping, breaks=c(0,0.2,0.75,1), labels=c("low","medium","high"), include.lowest = TRUE)
+  rowData(se)[[paste0("damping",f)]] <- NA_real_
+  rowData(se)[row.names(dt[[f]]),paste0("damping",f)] <- dt[[f]]$damping
+  dt[[f]] <- dt[[f]][order(sign(dt[[f]]$logFC)*dt[[f]]$damping),]
+}
+```
+
+```{r}
+# take the most significant damping per gene
+ag1 <- d[!duplicated(d$gene),]
+row.names(ag1) <- ag1$gene
+ag1 <- ag1[,c("gene","TimePoint","logFC","logCPM","FDR","logFC.CRS","PValue.CRS","FDR.CRS","damping")]
+names(ag1)[ncol(ag1)] <- "topDamping"
+# take the weighted mean of the damping
+ag2 <- sapply(split(d[,c("damping","PValue.CRS")], d$gene), FUN=function(x){
+  weighted.mean(x$damping, pmax(0,-log10(x$PValue.CRS)-0.3),na.rm=TRUE)
+})
+ag1$wmDamping <- ag2[row.names(ag1)]
+ag <- setNames(ag1$wmDamping, ag1$gene)
+ag <- ag[names(ag) %in% row.names(se)]
+alldegs <- union(row.names(se)[which(rowData(se)$FDR<0.05)],
+                 length(unique(unlist(getDEGs(se, lfc.th=th.lfc)))))
+adegs2 <- intersect(alldegs, names(ag))
+ag <- ag[adegs2]
+ag <- ag[!is.na(ag)]
+rowData(se)$maxDamping <- NA_real_
+rowData(se)[names(ag),"maxDamping"] <- as.numeric(ag)
+
+dc <- cut(ag, breaks=c(0,0.1,0.4,0.75,1), labels=c("none","low","medium","high"), include.lowest = TRUE)
+
+g <- c("Calb1","Dusp5","Npas4","Fkbp5", "Gadd45g", "Homer1")
+dampingPlot(data.frame(gene=names(ag), rank=rank(ag)/length(ag), damping=ag, category=dc),
+            goi=g)
+
+rowData(se)$dampingCategory <- NA
+rowData(se)[names(ag),"dampingCategory"] <- dc
+rowData(se)$dampingCategory <- factor(rowData(se)$dampingCategory, c("none","low","medium","high"))
+se$readType <- "unspliced"
+saveRDS(se, file="all.unspliced.SE.rds")
+```
+

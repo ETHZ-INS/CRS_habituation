@@ -1,0 +1,135 @@
+---
+title: "S2"
+output: html_document
+date: "2024-11-25"
+---
+
+```{r setup}
+knitr::opts_chunk$set(dev="CairoPNG")
+suppressPackageStartupMessages({
+  library(sechm)
+  library(edgeR)
+  library(stageR)
+  library(ggplot2)
+  library(cowplot)
+  library(patchwork)
+  library(clusterProfiler)
+})
+source("../functions/functions.R")
+source("../functions/clusterProfiling.R")
+th.lfc <- log2(1.2)
+```
+
+# CRS interaction foldchanges across timepoints
+
+```{r}
+se <- readRDS("../rnaDEAs/all.full.SE.rds")
+se <- updateSEforPlots(se)
+degs <- getDEGs(getDEA(se)[1:5], lfc.th = th.lfc)
+names(tp) <- tp <- c("45min","1h30","3h")
+d <- dplyr::bind_rows(lapply(tp, FUN=function(p){
+  x <- getDEA(se, paste0("inter.Treatment10days.CRS.TimePoint",p))[degs,c("logFC","FDR")]
+  y <- getDEA(se, paste0("inter.Treatment20days.CRS.TimePoint",p))[degs,c("logFC","FDR")]
+  colnames(x) <- paste0(colnames(x),".10days")
+  colnames(y) <- paste0(colnames(y),".20days")
+  cbind(gene=degs,x,y)
+}), .id="TimePoint")
+d <- d[which((d$FDR.10days<0.05 & abs(d$logFC.10days)>log2(1.15)) | 
+               (d$FDR.20days<0.05 & abs(d$logFC.20days)>log2(1.15))),]
+d$TimePoint <- factor(d$TimePoint,unique(d$TimePoint))
+d$minFDR <- pmin(d$FDR.10days,d$FDR.20days)
+fdrbr <- c(0.01,0.0001,0.000001,10^-10)
+sp1 <- ggplot(d, aes(logFC.10days, logFC.20days)) + geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+  geom_abline(slope=1,intercept=0,linetype="dashed") + geom_smooth(method=MASS::rlm) +
+  geom_point(aes(alpha=-log10(minFDR))) + facet_wrap(~TimePoint, scales="free") + theme_bw() +
+  labs(x="CRS:ARS Interaction logFC (10days)", y="CRS:ARS Interaction\nlogFC (20days)", alpha="FDR") +
+  scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0))
+```
+
+
+# Clustering
+
+```{r}
+se <- updateSEforPlots(se)
+se <- se[,se$TimePoint !="24h"]
+gl <- readRDS("../rnaDEAs/full.dampingClusters.rds")
+cl <- readRDS("../rnaDEAs/clustering_res.rds")
+cl <- cl[as.character(c(3,4,1,2,8,5,10,9,7,6))]
+
+rowData(se)$metacluster <- NA_integer_
+for(f in names(gl)) rowData(se)[gl[[f]],"metacluster"] <- f
+
+gl2 <- list(
+  "(down) not damped"=cl[["5"]],
+  "(down) faster return\nto baseline"=cl[["9"]],
+  "(down) ablated\nat 3h"=c(cl[["6"]],cl[["7"]])
+)
+for(f in names(gl2)) rowData(se)[gl2[[f]],"metacluster"] <- f
+rowData(se)$metacluster <- factor(rowData(se)$metacluster, c(names(gl),names(gl2)))
+hm <- grid.grabExpr(draw(sechm(se, cl, gaps_at="TimePoint", assayName = "scaledLFC", row_title_gp=gpar(fontsize=12), column_title_gp=gpar(fontsize=12), left_annotation = "metacluster")))
+```
+
+```{r}
+ora <- readRDS(file="../rnaDEAs/dampingClusters_enrichments.down.rds")
+ora$Cluster <- factor(ora$Cluster, levels(ora$Cluster)[c(3,2,1)])
+enr.down <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,8)) + 
+  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
+  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8),
+                       axis.title=element_blank()) + labs(fill="fold-\nenrichment") +
+  ggtitle("Downregulated")
+```
+
+```{r}
+en <- readRDS("../rnaDEAs/dampingClusters_enrichments.rds")
+gl.ora <- en$vsResponse$ORA
+sigTerms <- unique(unlist(lapply(gl.ora, FUN=function(x) head(row.names(x)[which(x$FDR<0.25)]))))
+ora <- dplyr::bind_rows(lapply(gl.ora, FUN=function(x){
+  x <- x[sigTerms,]
+  x$pathway <- sigTerms
+  x
+}), .id="Cluster")
+ora$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",ora$pathway)))
+ora$Cluster <- factor(ora$Cluster, names(gl))
+
+
+enr.vsStress <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,12)) + 
+  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
+  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8), 
+                       axis.title=element_blank()) + labs(fill="fold-\nenrichment") +
+  ggtitle("Upregulated\nvs stress-responsive")
+```
+
+```{r}
+gl.ora <- en$vsExpressed$regulons
+sigTerms <- unique(unlist(lapply(gl.ora, FUN=function(x) head(row.names(x)[which(x$FDR<0.05)]))))
+ora <- dplyr::bind_rows(lapply(gl.ora, FUN=function(x){
+  x <- x[sigTerms,]
+  x$pathway <- sigTerms
+  x
+}), .id="Cluster")
+ora$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",ora$pathway)))
+ora$Cluster <- factor(ora$Cluster, names(gl))
+
+
+enr.tfs <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,12)) + 
+  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
+  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8), 
+                       axis.title=element_blank()) + labs(fill="fold-\nenrichment") +
+  ggtitle("TF targets\nenrichment")
+
+```
+
+
+```{r, fig.width=11, fig.height=13}
+pdf("S2.pdf", width=11, height=13)
+cowplot::plot_grid(
+  sp1,
+  plot_grid(hm, enr.tfs, nrow=1, rel_widths = c(2,1), scale=0.95, labels=c("B","C")),
+  plot_grid(enr.vsStress, enr.down, nrow=1, labels=c("D","E"), scale=0.95),
+  scale=c(0.95,1,1), labels=c("A",NA,NA), nrow=3, rel_heights=c(2,4,4)
+)
+dev.off()
+```

@@ -1,0 +1,177 @@
+---
+title: 'Figure 6 : sc'
+output: html_document
+date: "2024-10-27"
+---
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(RColorBrewer)
+  library(scater)
+})
+theme_set(theme_bw())
+source("../scMultiome/GEX_analysis/functions.R")
+source("../functions/functions.R")
+options(ggrastr.default.dpi=600)
+```
+
+
+```{r}
+sce <- readRDS("../scMultiome/GEX_analysis/neuronal.SCE.rds")
+sce <- sce[,which(sce$log10sum>3.5 & sce$contamination<0.25)]
+sce <- updateSEforPlots(sce)
+deas <- readRDS("../scMultiome/GEX_analysis/neuronal.DEA.rds")
+pb <- readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds")
+pb <- updateSEforPlots(pb)
+
+sce$broad <- sce$celltype
+levels(sce$broad) <- gsub("ExN.|-ve|-do|-HATA|/.+","",levels(sce$broad))
+
+sce$activity2 <- (pmin(pmax(0,sce$activity),1))
+uact <- plotUMAP(sce, colour_by="activity2", text_by="celltype", bins=100, hex=TRUE, text_size=3.5, summary_fun=mean) + 
+  scale_fill_gradient2(low="lightgray",high="darkred",breaks=scales::breaks_pretty(n = 3)) + labs(fill="ADT")
+uact
+```
+
+
+```{r}
+cols <- c("Handling +ARS"="darkgrey", "CRS +ARS"="#0000CD96")
+tt <- split(sce$activity2>0.5, sce$Sample)
+d <- data.frame(sample=names(tt), Treatment=factor(gsub("_.+","",names(tt))),
+                TimePoint=sapply(strsplit(names(tt),"_"), \(x) x[2]),
+                propActivated=sapply(tt, \(x) sum(x, na.rm=TRUE)/sum(!is.na(x))))
+d$TimePoint <- factor(d$TimePoint, levels(sce$TimePoint))
+levels(d$Treatment) <- names(cols)
+
+mod <- lm(propActivated~TimePoint*Treatment, data=d)
+ars.effect <- tail(lmtest::lrtest(lm(propActivated~Treatment, data=d), mod)$`Pr(>Chisq)`,1)
+crs.effect <- tail(lmtest::lrtest(lm(propActivated~TimePoint, data=d), mod)$`Pr(>Chisq)`,1)
+lab <- paste0("ARS p=", format(ars.effect, digit=1), "\nCRS p=", format(crs.effect, digit=1))
+
+propAct <- ggplot(d, aes(TimePoint, propActivated, fill=Treatment)) + geom_boxplot() +
+    stat_summary(fun=mean, geom="line", aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment), linewidth=1.2)  + 
+    theme_bw() + labs(y="Proportion of\nneurons activated") + ylim(0,NA) +
+  scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
+  annotate("text", y=0, x=0.5, label=lab, hjust=0, vjust=0, size=3.5)
+
+
+
+tt <- split(sce$activity2, sce$Sample)
+tt <- sapply(tt, FUN=function(x) median(x[which(x>0.5)]))
+d$ADT <- tt
+
+mod <- lm(ADT~TimePoint*Treatment, data=d)
+ars.effect <- tail(lmtest::lrtest(lm(ADT~Treatment, data=d), mod)$`Pr(>Chisq)`,1)
+crs.effect <- tail(lmtest::lrtest(lm(ADT~TimePoint, data=d), mod)$`Pr(>Chisq)`,1)
+lab <- paste0("ARS p=", format(ars.effect, digit=1), "\nCRS p=", format(crs.effect, digit=1))
+
+actADT <- ggplot(d, aes(TimePoint, ADT, fill=Treatment)) + geom_boxplot() +
+  stat_summary(fun=mean, geom="line", aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment), linewidth=1.2)  + 
+  theme_bw() + labs(y="median ADT score of\nactivated neurons") + ylim(0,NA) +
+  scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
+  annotate("text", y=0, x=0.5, label=lab, hjust=0, vjust=0, size=3.5)
+
+
+activated <- free(uact + theme_void()) + ( (propAct | actADT) + patchwork::plot_layout(guides="collect") & theme(legend.position = "bottom")) + plot_annotation(tag_levels = "A")
+activated
+```
+
+```{r}
+#sce$mean2 <- (sce$neuroestimator + sce$activity2)/2
+d <- data.frame(Sample=sce$Sample, TimePoint=sce$TimePoint, Treatment=sce$Treatment,
+                celltype=sce$celltype2, activity2=sce$activity2, ADT=sce$ADT, activityScaled=sce$activityScaled,
+                neuroestimator=sce$neuroestimator, meanAct=sce$meanAct)
+ag <- aggregate(d[,-1:-4], by=d[,1:4], FUN=mean)
+ag2 <- aggregate(d[,-1:-4], by=d[,1:4], FUN=\(x) sum(x>0.5,na.rm=TRUE)/length(x))[,-1:-4]
+colnames(ag2) <- paste0("p.",colnames(ag2))
+ag <- cbind(ag, ag2)
+ag <- ag[!grepl("Tshz2|Ccn2|CR$", ag$celltype),]
+
+tests <- dplyr::bind_rows(lapply(split(ag, ag$celltype, drop=TRUE), FUN=function(d){
+  mod <- lm(p.meanAct~TimePoint*Treatment, data=d)
+  ars.effect <- tail(lmtest::lrtest(lm(p.meanAct~Treatment, data=d), mod)$`Pr(>Chisq)`,1)
+  crs.effect <- tail(lmtest::lrtest(lm(p.meanAct~TimePoint, data=d), mod)$`Pr(>Chisq)`,1)
+  data.frame(celltype=d$celltype[1],
+             lab=paste0("ARS p=", format(ars.effect, digit=1), "\nCRS p=", format(crs.effect, digit=1)))
+}))
+
+
+pbprop <- ggplot(ag, aes(TimePoint, p.meanAct)) + 
+    stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment)) + 
+    geom_boxplot(alpha=0.8, aes(fill=Treatment)) + facet_wrap(~celltype, nrow=3) +
+    theme_bw() + labs(y="Proportion activated (ADT>0.5)") + 
+  scale_x_discrete() + scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
+    theme(legend.position=c(1, 0), legend.justification=c(1, 0),
+          axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
+  geom_text(data=tests, y=0.32, x=0.5, aes(label=lab), size=3, colour="black", hjust=0, vjust=1)
+```
+
+```{r, eval=FALSE}
+se <- reshape2::dcast(ag, celltype~Sample, value.var="prop.act")
+row.names(se) <- se[,1]
+tmp <- ag[!duplicated(ag$Sample),1:3]
+row.names(tmp) <- tmp[,1]
+se <- SummarizedExperiment(list(propAct=se[,-1]), colData=tmp[colnames(se)[-1],])
+se <- se[,order(se$TimePoint,se$Treatment)]
+row.names(se) <- gsub("\\n",".",row.names(se))
+metadata(se)$anno_colors <- metadata(pb)$anno_colors
+draw(sechm(se, row.names(se), gaps_at="TimePoint", top_annotation = "Treatment",
+      hmcols = viridis::viridis(100), name="Proportion\nactivated"), merge=TRUE)
+```
+
+
+```{r, fig.width=10, fig.height=5}
+nn <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.SCE.rds")
+#nn <- nn[,which(nn$log10sum>3 & nn$contamination<0.5)]
+nn <- nn[,!grepl("cycling|^CR$|other|PVM",nn$celltype)]
+nn <- updateSEforPlots(nn)
+nuact <- plotUMAP(nn, colour_by="ADT", text_by="celltype", bins=100, hex=TRUE, text_size=3.5, summary_fun=mean) + 
+  scale_fill_gradient2(low="lightgray",high="darkred",breaks=scales::breaks_pretty(n = 3)) + labs(fill="ADT")
+
+d <- data.frame(Sample=nn$Sample, TimePoint=nn$TimePoint, Treatment=nn$Treatment,
+                celltype=nn$broadClass, ADT=nn$ADT)
+d$celltype <- droplevels(d$celltype)
+ag <- aggregate(d[,-1:-4], by=d[,1:4], FUN=mean)
+ag2 <- aggregate(d[,-1:-4,drop=FALSE], by=d[,1:4], FUN=\(x) sum(x>0.5,na.rm=TRUE)/length(x))[,-1:-4,drop=FALSE]
+colnames(ag2) <- paste0("p.",colnames(ag2))
+ag <- cbind(ag, ag2)
+
+tests <- dplyr::bind_rows(lapply(split(ag, ag$celltype, drop=TRUE), FUN=function(d){
+  mod <- lm(p.ADT~TimePoint*Treatment, data=d)
+  ars.effect <- tail(lmtest::lrtest(lm(p.ADT~Treatment, data=d), mod)$`Pr(>Chisq)`,1)
+  crs.effect <- tail(lmtest::lrtest(lm(p.ADT~TimePoint, data=d), mod)$`Pr(>Chisq)`,1)
+  data.frame(celltype=d$celltype[1],
+             lab=paste0("ARS p=", format(ars.effect, digit=1), "\nCRS p=", format(crs.effect, digit=1)))
+}))
+
+
+
+nprop <- ggplot(ag, aes(TimePoint, p.ADT)) + 
+    stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment)) + 
+    geom_boxplot(alpha=0.8, aes(fill=Treatment)) + facet_wrap(~celltype, nrow=2) +
+    theme_bw() + labs(y="Proportion activated (ADT>0.5)") + 
+  scale_x_discrete() + scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
+    theme(legend.position=c(1, 0), legend.justification=c(1, 0),
+          axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
+  geom_text(data=tests, y=0.73, x=0.5, aes(label=lab), size=2.5, colour="black", hjust=0, vjust=1)
+nuact + nprop
+```
+
+
+
+```{r, fig.width=10, fig.height=13}
+pdf("Figure7.pdf", width=10, height=13)
+plot_grid(
+  activated & theme(plot.tag = element_text(face = 'bold')),
+  pbprop,
+  plot_grid(nuact + theme_void(), nprop, labels=c("E","F"), scale=0.95, nrow=1),
+  nrow=3, rel_heights = c(2.5,3.9,2.5), scale=c(0.95,0.95,1), labels=c(NA, "D", NA)
+)
+dev.off()
+```

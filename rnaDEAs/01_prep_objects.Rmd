@@ -1,0 +1,154 @@
+---
+title: "Prepare initial objects"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+  library(readxl)
+  library(S4Vectors)
+})
+```
+
+```{r}
+cols <- setNames(RColorBrewer::brewer.pal(6, "YlOrRd"),
+                 c("0min","45min","1h30","3h","5h30","24h"))
+meta <- list(
+  default_view=list(assay="log2FC", groupvar="TimePoint", colvar="Treatment"),
+  anno_colors=list( Sex=c(male="salmon",female="lightgreen"),
+                    Treatment=c(Handling="lightgray", "10days CRS"="blue3", "20days CRS"="midnightblue"),
+                    TimePoint=cols)
+)
+```
+
+
+## ARS
+
+```{r}
+lf <- list.files("input/ARStimecourse/kallisto", pattern="abundance\\.h5", recursive=TRUE, full=TRUE)
+a <- tximport::tximport(lf, type="kallisto", txOut=TRUE)
+e <- a$counts
+e <- e[grep("protein_coding",row.names(e)),]
+g <- sapply(strsplit(row.names(e),"|",fixed=TRUE), FUN=function(x) x[6])
+e <- scuttle::sumCountsAcrossFeatures(e, g)
+colnames(e) <- gsub("-",".",basename(gsub("/output/abundance\\.h5","",lf)))
+
+m <- read.delim("input/ARStimecourse/metadata/s2c_server.csv", sep=";", row.names=1)
+row.names(m) <- gsub("-",".",row.names(m))
+m <- m[,-1:-3]
+m$TimePoint <- factor(m$TimePoint,
+                      levels=c("0min","45min","90min","3h","5h30min","24h"),
+                      labels=c("0min","45min","1h30","3h","5h30","24h"))
+m$Batch <- m$Block
+m$Block <- m$Condition <- m$Condition2 <- m$SampleProcessing <- NULL
+m$Experiment[grep("CRS4",rownames(m))] <- "CRS4"
+m$Experiment <- as.factor(m$Experiment)
+m$Treatment <- "Handling"
+m$Sex <- as.factor(m$Sex)
+m$readType <- "full"
+
+if(!all(colnames(e) %in% row.names(m))) stop("Samples mismatch!")
+m <- m[colnames(e),]
+se1 <- SummarizedExperiment(list(counts=e), colData=m)
+se1 <- se1[,order(se1$TimePoint, se1$Sex)]
+
+saveRDS(se1, file="data/ARS.full.SE.rds")
+```
+
+
+```{r}
+se1u <- readRDS("input/ARStimecourse/STAR/unspliced.SE.rds")
+colnames(se1u) <- gsub("^X","",paste0(colnames(se1u),"_R1"))
+se1u <- se1u[,colnames(se1)]
+colData(se1u) <- colData(se1)
+se1u$readType <- "unspliced"
+i <- intersect(row.names(se1),row.names(se1u))
+saveRDS(se1[i,], file="data/ARS.full.SE.rds")
+saveRDS(se1u[i,], file="data/ARS.unspliced.SE.rds")
+```
+
+
+## CRS
+
+```{r}
+lf <- list.files("input/CRS/kallisto", pattern="abundance\\.h5", recursive=TRUE, full=TRUE)
+a <- tximport::tximport(lf, type="kallisto", txOut=TRUE)
+e <- a$counts
+e <- e[grep("protein_coding",row.names(e)),]
+g <- sapply(strsplit(row.names(e),"|",fixed=TRUE), FUN=function(x) x[6])
+e <- scuttle::sumCountsAcrossFeatures(e, g)
+colnames(e) <- basename(gsub("/output/abundance\\.h5","",lf))
+
+m <- as.data.frame(readxl::read_excel("input/CRS/metadata/2022-04_CRS3+CRS4_metadata_2.xlsx"))
+rownames(m) <- m[["Sample ID"]]
+m <- m[,3:5]
+colnames(m)[1:2] <- c("Treatment","TimePoint")
+m$TimePoint <- factor(m$TimePoint, c("0min","45min","1h30min","3h","5h30min","24h"),
+                      labels=c("0min","45min","1h30","3h","5h30","24h"))
+m$Experiment <- "CRS3"
+m$Experiment[grep("CRS4",rownames(m))] <- "CRS4"
+m$Experiment <- as.factor(m$Experiment)
+m$Treatment <- factor(paste(m$Treatment, m$Experiment))
+levels(m$Treatment) <- c("Handling","Handling","10days CRS","20days CRS")
+m$Batch <- m$Experiment
+m$Sex <- as.factor(m$Sex)
+m$readType <- "full"
+
+if(!all(colnames(e) %in% rownames(m))) stop("Samples mismatch!")
+m <- m[colnames(e),]
+se2 <- SummarizedExperiment(list(counts=e), colData=m)
+se2 <- se2[,order(se2$TimePoint, se2$Treatment, se2$Sex)]
+
+saveRDS(se2, file="data/CRS.full.SE.rds")
+```
+
+```{r}
+se2u <- readRDS("input/CRS/STAR/unspliced.SE.rds")
+se2u <- se2u[,colnames(se2)]
+colData(se2u) <- colData(se2)
+se2u$readType <- "unspliced"
+i <- intersect(i,intersect(row.names(se2),row.names(se2u)))
+se2u <- se2u[i,]
+metadata(se1) <- metadata(se2) <- metadata(se1u) <- metadata(se2u) <- meta
+saveRDS(se2[i,], file="data/CRS.full.SE.rds")
+saveRDS(se2u, file="data/CRS.unspliced.SE.rds")
+```
+
+```{r}
+saveRDS(se1[i,], file="data/ARS.full.SE.rds")
+saveRDS(se1u[i,], file="data/ARS.unspliced.SE.rds")
+```
+
+### Transcript-level
+
+```{r}
+lf <- list.files("input/CRS/kallisto", pattern="abundance\\.h5", recursive=TRUE, full=TRUE)
+a <- tximport::tximport(lf, type="kallisto", txOut=TRUE)
+e <- a$counts
+colnames(e) <- basename(gsub("/output/abundance\\.h5","",lf))
+
+m <- as.data.frame(readxl::read_excel("input/CRS/metadata/2022-04_CRS3+CRS4_metadata_2.xlsx"))
+rownames(m) <- m[["Sample ID"]]
+m <- m[,3:5]
+colnames(m)[1:2] <- c("Treatment","TimePoint")
+m$TimePoint <- factor(m$TimePoint, c("0min","45min","1h30","3h","5h30","24h"))
+m$Experiment <- "CRS3"
+m$Experiment[grep("CRS4",rownames(m))] <- "CRS4"
+m$Experiment <- as.factor(m$Experiment)
+m$Treatment <- factor(paste(m$Treatment, m$Experiment))
+levels(m$Treatment) <- c("Handling","Handling","10days CRS","20days CRS")
+m$Batch <- m$Experiment
+m$Sex <- as.factor(m$Sex)
+m$readType <- "full"
+
+if(!all(colnames(e) %in% rownames(m))) stop("Samples mismatch!")
+m <- m[colnames(e),]
+se2 <- SummarizedExperiment(list(counts=e), colData=m)
+rowData(se2)$length <- rowMeans(a$length)
+rowData(se2)$gene <- sapply(strsplit(row.names(se2),"|",fixed=TRUE), FUN=function(x) x[6])
+row.names(se2) <- gsub("\\|.+","",row.names(se2))
+se2 <- se2[,order(se2$TimePoint, se2$Treatment, se2$Sex)]
+metadata(se2) <- meta
+saveRDS(se2, file="data/CRS.txLevel.SE.rds")
+```

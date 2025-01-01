@@ -1,0 +1,209 @@
+---
+title: "differences_between_activated_neurons"
+output: html_document
+date: "2024-11-08"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(RColorBrewer)
+})
+theme_set(theme_bw())
+source("GEX_analysis/functions.R")
+source("../functions/functions.R")
+
+cols <- c("Handling"="darkgrey", "Restraint"="#0000CD96")
+```
+
+
+```{r}
+sce <- readRDS("GEX_analysis/neuronal.SCE.rds")
+deas <- readRDS("../scMultiome/GEX_analysis/neuronal.DEA.rds")
+pb <- readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds")
+```
+
+
+```{r, eval=FALSE}
+sce <- logNormCounts(sce)
+sce$celltype2 <- gsub("/","\n",sce$celltype)
+sce$celltype2 <- factor(sce$celltype2, sort(unique(sce$celltype2)))
+sce$celltype <- factor(sce$celltype, sort(as.character(unique(sce$celltype))))
+
+tt <- sort(table(deas$gene[deas$ihw<0.15]), decreasing=TRUE)
+rg <- names(tt)[tt>1]
+sce$activity <- computeCellResponseCoef(deas[grepl("^ARS15|^ARS45",deas$Comparison) & deas$gene %in% rg,],
+                                        sce=sce, pb[,pb$TimePoint=="Control"])
+q <- quantile(sce$activity,0.98,na.rm=TRUE)
+sce$activityScaled <- pmax(pmin(sce$activity,q), 0)/q
+sce$ADT <- sce$activityScaled
+sce$ADT[is.na(sce$ADT)] <- 0
+
+# cr <- AUCell_buildRankings(sce)
+# auc <- AUCell_calcAUC(list(activity=rg), cr, aucMaxRank=ceiling(0.1 * nrow(cr)))
+# sce$activity2 <- getAUC(auc)[1,]
+# AUCell scores discarded because they show more inter-replicate variation
+
+
+assays(sce) <- assays(sce)[1]
+saveRDS(sce, file="GEX_analysis/neuronal.SCE.rds")
+```
+
+```{r}
+receptors <- lapply(
+  list(Serotonin="Htr1f|Htr4|Htr7|Htr2a|Htr1a|Htr2c|Htr3a",
+        Glutamate="Grm5|Grm7|Grm1|Grm8|Grm3|Grm2",
+        GABA="Gabra1|Gabra5|Gabrb2|Gabrg3|Gabrg2|Gabra4|Gabrb3|Gabrb1|Gabra3|Gabra2|Gabrg1",
+        Dopamine="Drd1|Drd2|Drd4|Drd5",
+        AMPA="Gria",
+        Kainate="Grik",
+        NMDA="Grin2a|Grin2b|Grin1|Grin3a|tfbs_light/blob/master/R/featureMatrix.RGrina|Grin2d",
+        "(Nor)adrenaline"="Adra1b|Adra1a|Adra1d|Adra2c|Adrb1"), FUN=function(x){
+          grep(x, row.names(sce), value=TRUE)
+        })
+
+```
+
+
+```{r}
+sca <- sce[,sce$ADT>0.5]
+sca$broad <- sca$celltype
+levels(sca$broad) <- gsub("-ve|-do|-HATA/Camk2d|/.+|\\.Ntng1|\\.Adarb2|\\.Lamp5|\\.Pvalb|\\.Sst","",levels(sca$celltype))
+
+sca <- prepSCE(sca, kid="broad", sid="Sample", gid="TimePoint")
+pb2 <- aggregateData(sca)
+
+mm <- model.matrix(~Treatment*group_id, data=as.data.frame(colData(pb2)))
+coefs <- c(list(stressAny=grep("group_id",colnames(mm)),
+                treatAny=grep("Treatment",colnames(mm))),
+           lapply(setNames(seq_len(ncol(mm))[-1],colnames(mm)[-1]), FUN=identity))
+res <- pbDS(pb2, design=mm, BPPARAM=BiocParallel::MulticoreParam(10), min_cells=40,
+            coef=coefs)
+
+names(res$table) <- gsub("group_id","ARS",names(res$table))
+names(res$table) <- gsub("Treatment","",names(res$table))
+names(res$table)[1:2] <- c("stressAny","treatmentAny")
+
+res$table <- lapply(res$table, FUN=function(x){
+  lapply(x, FUN=function(y){
+    y$FDR2 <- 1
+    dplyr::bind_rows(lapply(split(y,y$coef), FUN=function(z){
+      w <- which(z$gene %in% unlist(receptors))
+      y$FDR2[w] <- p.adjust(y$p_val[w])
+      y
+    }))
+  })
+})
+
+res2 <- dplyr::bind_rows(lapply(res$table, FUN=dplyr::bind_rows), .id="Comparison")
+res2$coef <- NULL
+res2 <- res2[order(res2$FDR2),]
+
+
+```
+
+```{r, fig.width=15, fig.height=10}
+pb3 <- pbFlatten(pb2)
+d <- meltSE(pb3, c("Htr2c","Gria4","Grik1","Gabra1"), rowDat.columns = NA)
+
+ggplot(d, aes(group_id, logcpm, fill=Treatment)) + 
+  geom_boxplot() + facet_wrap(~cluster_id+feature, scales="free_y")
+```
+
+
+In comparison to neurons activated at baseline, neurons that activated in the stress condition had a higher expression of the serotinin receptor Htr2c, 
+
+
+
+
+
+
+
+```{r}
+sce <- readRDS("GEX_analysis/nonNeuronal.SCE.rds")
+deas <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.DEA.rds")
+pb <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.broad.PB.rds")
+```
+
+
+```{r, eval=FALSE}
+sce <- logNormCounts(sce)
+sce$activity <- NA_real_
+cts <- c("microglia","OPC","oligodendrocyte","astrocytes","vascular")
+for(f in cts){
+  w <- which(sce$broadClass==f)
+  dea <- deas[deas$cluster_id==f & grepl("^ARS",deas$Comparison),]
+  pb2 <- pb[,pb$broadClass==f & pb$TimePoint=="Control"]
+  rg <- unique(dea[which(dea$ihw<0.15),"gene"])
+  tmp <- computeCellResponseCoef(dea[dea$gene %in% rg,], sce=sce[,w], pb2, ctfield="broadClass")
+  sce$activity[w] <- tmp
+}
+  
+q <- quantile(sce$activity,0.98,na.rm=TRUE)
+sce$activityScaled <- pmax(pmin(sce$activity,q), 0)/q
+sce$ADT <- sce$activityScaled
+sce$ADT[is.na(sce$ADT)] <- 0
+
+assays(sce) <- assays(sce)[1]
+saveRDS(sce, file="GEX_analysis/nonNeuronal.SCE.rds")
+```
+
+```{r}
+d <- data.frame(Sample=sce$Sample, TimePoint=sce$TimePoint, Treatment=sce$Treatment,
+                celltype=sce$broadClass, ADT=sce$ADT, activityScaled=sce$activityScaled)
+ag <- aggregate(d[,-1:-4], by=d[,1:4], FUN=mean)
+ag2 <- aggregate(d[,-1:-4], by=d[,1:4], FUN=\(x) sum(x>0.5,na.rm=TRUE)/length(x))[,5:6]
+colnames(ag2) <- c("prop.act","prop.act2")
+ag <- cbind(ag, ag2)
+ag <- ag[ag$celltype %in% cts,]
+pbprop <- ggplot(ag, aes(TimePoint, prop.act, fill=Treatment)) + 
+    stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment)) + 
+    geom_boxplot(alpha=0.8) + facet_wrap(~celltype, nrow=3) +
+    theme_bw() + labs(y="Proportion activated (ADT>0.5)") + 
+  scale_x_discrete() + scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
+    theme(legend.position=c(1, 0), legend.justification=c(1, 0),
+          axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+```
+
+
+```{r}
+sca <- sce[,sce$ADT>0.5]
+
+sca <- prepSCE(sca, kid="broadClass", sid="Sample", gid="TimePoint")
+pb2 <- aggregateData(sca)
+
+mm <- model.matrix(~Treatment*group_id, data=as.data.frame(colData(pb2)))
+coefs <- c(list(stressAny=grep("group_id",colnames(mm)),
+                treatAny=grep("Treatment",colnames(mm))),
+           lapply(setNames(seq_len(ncol(mm))[-1],colnames(mm)[-1]), FUN=identity))
+res <- pbDS(pb2, design=mm, BPPARAM=BiocParallel::MulticoreParam(10), coef=coefs)
+
+names(res$table) <- gsub("group_id","ARS",names(res$table))
+names(res$table) <- gsub("Treatment","",names(res$table))
+names(res$table)[1:2] <- c("stressAny","treatmentAny")
+
+res$table <- lapply(res$table, FUN=function(x){
+  lapply(x, FUN=function(y){
+    y$FDR2 <- 1
+    dplyr::bind_rows(lapply(split(y,y$coef), FUN=function(z){
+      w <- which(z$gene %in% unlist(receptors))
+      y$FDR2[w] <- p.adjust(y$p_val[w])
+      y
+    }))
+  })
+})
+
+res2 <- dplyr::bind_rows(lapply(res$table, FUN=dplyr::bind_rows), .id="Comparison")
+res2$coef <- NULL
+res2 <- res2[order(res2$FDR2),]
+```
+
+```{r, fig.width=15, fig.height=10}
+pb3 <- pbFlatten(pb2)
+d <- meltSE(pb3, c("Htr2c","Gria4","Grik1","Gabra1"), rowDat.columns = NA)
+
+ggplot(d, aes(group_id, logcpm, fill=Treatment)) + 
+  geom_boxplot() + facet_wrap(~cluster_id+feature, scales="free_y")
+```

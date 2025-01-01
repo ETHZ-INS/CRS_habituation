@@ -1,0 +1,548 @@
+---
+title: "early_exploration"
+output: html_document
+date: "2024-11-19"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(edgeR)
+  library(sechm)
+  library(chromVAR)
+  library(ggplot2)
+})
+```
+
+```{r}
+da <- readRDS("ATAC/da_sva_neuronal_crs.rds")
+da <- as.data.frame(da)
+da <- da[da$table.PValue.x<0.01,]
+de <- da[grepl("CA1",da$celltype) & !grepl("Camk2d",da$celltype) &
+           da$comparison %in% c("group_id15min","TreatmentRestraint.group_id15min"),]
+de2 <- aggregate(de$table.logFC, by=de[,c("peak_id","comparison")], FUN=mean)
+de3 <- reshape2::dcast(de2, peak_id~comparison, value.var="x")
+de4 <- de3[!is.na(de3$group_id15min) & !is.na(de3$TreatmentRestraint.group_id15min),]
+
+gr <- as(de3$peak_id, "GRanges")
+mcols(gr) <- de3[,-1]
+de3$group_id15min[is.na(de3$group_id15min)] <- 0
+de3$TreatmentRestraint.group_id15min[is.na(de3$TreatmentRestraint.group_id15min)] <- 0
+```
+
+```{r, fig.width=10, fig.height=7}
+pb <- readRDS("ATAC/pbNr_non_resized.rds")
+pb <- pb[,grepl("CA1",pb$cluster_id) & !grepl("Camk2d|Fn1",pb$cluster_id)]
+row.names(pb) <- as.character(granges(pb))
+dge <- calcNormFactors(DGEList(assay(pb)))
+assays(pb)$logcpm <- log1p(cpm(dge))
+pb <- log2FC(pb, "logcpm", pb$group_id=="Control" & pb$Treatment=="Handling", by=pb$cluster_id)
+pb <- pb[,order(pb$cluster_id, pb$group_id, pb$Treatment)]
+sig <- grep("^chr1:",de4$peak_id,value=TRUE)
+rowData(pb)$meanAcc <- rowMeans(assay(pb,"logcpm"))
+sechm(pb[,pb$group_id!="3h"], sig, assayName = "log2FC", top_annotation = c("Treatment", "group_id"), gaps_at="cluster_id", left_annotation="meanAcc")
+```
+
+```{r}
+pb <- readRDS("ATAC/pbNr_non_resized.rds")
+pb <- pb[,!grepl("Camk2d|Fn1",pb$cluster_id)]
+mds <- dplyr::bind_rows(lapply(split(seq_len(ncol(pb)), pb$cluster_id, drop=TRUE)[1:2], FUN=function(x){
+  dds <- DGEList(assay(pb)[,x])
+  dds <- calcNormFactors(dds)
+  mm <- model.matrix(~pb$group_id[x]*pb$Treatment[x])
+  dds <- dds[filterByExpr(dds,mm),]
+  mds <- limma::plotMDS(dds, plot=FALSE, top=5000, gene.selection="common")
+  ve <- mds$var.explained[1:2]
+  cbind(x=mds$x, y=mds$y, as.data.frame(colData(pb)[x,]))
+}))
+saveRDS(mds, file="ATAC/pbNr.mds.rds")
+ggplot(mds, aes(x,y,colour=group_id, shape=Treatment)) + geom_point() +
+  facet_wrap(~cluster_id, scales="free")
+```
+
+
+```{r, eval=FALSE}
+row.names(pb) <- as.character(granges(pb))
+pc <- dplyr::bind_rows(lapply(split(seq_len(ncol(pb)), pb$cluster_id, drop=TRUE)[1:2], FUN=function(x){
+  se <- pb[,x]
+  se <- se[filterByExpr(assay(se), model.matrix(~group_id*Treatment, data=as.data.frame(colData(se))))]
+  se <- SEtools::svacor(se, ~group_id*Treatment, n.sv=2)
+  se <- log2FC(se, "corrected", se$group_id=="Control" & se$Treatment=="Handling")
+  pr <- prcomp(t(assay(se, "log2FC")))
+  cbind(pr$x[,1:2], as.data.frame(colData(pb)[x,]))
+}))
+ggplot(mds, aes(x,y,colour=group_id, shape=Treatment)) + geom_point() +
+  facet_wrap(~cluster_id, scales="free")
+```
+
+```{r}
+motifmatchr <- getNamespace("motifmatchr")
+unlockBinding("pwmType", motifmatchr)
+motifmatchr$pwmType <- pwmType2 <- function (pwm) {
+    if (isTRUE(all.equal(colSums(as.matrix(pwm)), rep(1, length(pwm)), 
+        check.attributes = FALSE))) {
+        return("frequency")
+    }
+    else if (isTRUE(all.equal(colSums(2^(as.matrix(pwm)) * matrix(TFBSTools::bg(pwm), 
+        byrow = FALSE, ncol = length(pwm), nrow = 4)), rep(1, 
+        length(pwm)), tolerance = 10^-2, check.attributes = FALSE))) {
+        return("log2")
+    }
+    else if (isTRUE(all.equal(colSums(exp(as.matrix(pwm)) * matrix(TFBSTools::bg(pwm), 
+        byrow = FALSE, ncol = length(pwm), nrow = 4)), rep(1, 
+        length(pwm)), tolerance = 10^-2, check.attributes = FALSE))) {
+        return("log")
+    }
+    else {
+        stop("Can't determine format of PWM -- should be numeric ", 
+            "frequency summing to 1 or log or log2 odds ratio")
+    }
+}
+lockBinding("pwmType", motifmatchr)
+```
+
+```{r}
+pb <- keepStandardChromosomes(pb, pruning.mode = "coarse")
+```
+
+
+```{r, eval=FALSE}
+mo <- readRDS("/mnt/germain/datasets/AllMotifs_onePerGene.rds")
+mo <- mo[sapply(mo, FUN=function(x) x@icscore)>=10]
+motifs <- lapply(mo, universalmotif::convert_motifs, class="TFBSTools-PWMatrix")
+motifs <- do.call(TFBSTools::PWMatrixList,motifs)
+
+genome <- Rsamtools::FaFile("/reference/Mus_musculus/cellranger/refdata-cellranger-arc-mm10-2020-A-2.0.0/fasta/genome.fa")
+anno <- matchMotifs(motifs, subject = granges(rowRanges(pb)), genome=genome)
+saveRDS(anno, file="neurons.motifMatches.rds")
+```
+
+```{r, include=FALSE}
+anno <- readRDS("neurons.motifMatches.rds")
+```
+
+
+```{r}
+gff <- rtracklayer::import.gff("/reference/Mus_musculus/cellranger/refdata-cellranger-arc-mm10-2020-A-2.0.0/genes/genes.gtf.gz")
+genes <- gff[gff$type=="gene"]
+mcols(genes) <- mcols(genes)[,c("gene_name","gene_type")]
+di <- distanceToNearest(rowRanges(pb), genes)
+rowRanges(pb)$nearest.gene <- genes$gene_name[to(di)]
+rowRanges(pb)$nearest.dist <- mcols(di)$distance
+
+rna1 <- readRDS("GEX_analysis/neuronal.DEA.rds")
+expressed <- unique(rna1$gene[!is.na(rna1$logFC)])
+rna1 <- rna1[!grepl("Camk2d|Fn1",rna1$cluster_id) & !grepl("Restraint|3h|45min|Any",rna1$Comparison) & rna1$ihw<0.15,]
+degs1 <- unique(rna1$gene)
+rna2 <- readRDS("../rnaDEAs/all.full.SE.rds")
+rna2 <- getDEA(rna2,"45min")
+degs2 <- row.names(rna2)[which(rna2$logFC>0.2 & rna2$FDR<0.01)]
+degs <- intersect(union(degs1,degs2), expressed)
+
+g <- rowRanges(pb)
+w <- which(g$nearest.gene %in% expressed & abs(g$nearest.dist)<10000)
+anno <- anno[w]
+g <- g[w]
+w <- which(g$nearest.gene %in% degs & abs(g$nearest.dist)<10000)
+g2 <- g[w]
+ga <- anno[w]
+```
+
+```{r}
+ORA <- function(x, bg, gsets, minSize=5, excludeUnannotated=TRUE, reportOverlapping=TRUE){
+  if(!is.list(gsets) && is.vector(gsets)){
+    gsets <- list(set=gsets)
+  }else if(excludeUnannotated){
+    bg <- intersect(bg, unique(unlist(gsets)))
+  }
+  gsets <- lapply(gsets, unique)
+  x <- unique(intersect(x,bg))
+  gsets <- lapply(gsets, y=bg, FUN=intersect)
+  gsets <- gsets[which(lengths(gsets)>=minSize)]
+  res <- data.frame(Term=names(gsets), setSize=lengths(gsets))
+  res$overlap <- sapply(gsets, y=x, FUN=function(x,y){ length(intersect(x,y)) })
+  expected <- lengths(gsets)*length(x)/length(bg)
+  res$log2.enrichment <- round(log2(res$overlap/expected),2)
+  res$pValue <- fisher.test.p(res$overlap, lengths(gsets)-res$overlap,
+                              length(x)-res$overlap, 
+                              length(bg)-lengths(gsets)-length(x)+res$overlap,
+                              alternative="greater")
+  res <- res[which(res$overlap>0),]
+  res$FDR <- p.adjust(res$pValue)
+  if(reportOverlapping){
+    res$overlap.items <- sapply(gsets[row.names(res)], y=x, FUN=function(x,y){
+      paste(intersect(x,y),collapse=", ")
+    })
+  }
+  row.names(res) <- NULL
+  res[order(res$pValue, -res$log2.enrichment),]
+}
+
+#' fisher.test.p
+#' 
+#' Fast p-values from multiple Fisher's exact tests
+#'
+#' @param a,b,c,f Vectors containing the four positions of the 2x2 matrix
+#' @param alternative greater, less, or 'two.sided' (default)
+#'
+#' @return A vector of p-values
+#' @importFrom stats dhyper
+#' @export
+fisher.test.p <- function (a, b, c, d, 
+                           alternative=c("two.sided", "greater", "less")){
+  fn <- switch( match.arg(alternative), 
+     less = function(x,m,n,k) phyper(x, m, n, k), 
+     greater = function(x,m,n,k) phyper(x - 1, m, n, k, lower.tail=FALSE), 
+     two.sided = function(x,m,n,k){
+       lo <- max(0, k - n)
+       support <- seq(from=lo, to=min(k, m))
+       d <- dhyper(support, m, n, k, log = TRUE)
+       d <- exp(d - max(d))
+       d <- d/sum(d)
+       sum(d[d <= d[x - lo + 1] * (1 + 10^(-7))])
+     }
+  )
+  mapply(FUN=fn, a, a+c, b+d, a+b)
+}
+
+```
+
+
+```{r}
+sets <- apply(assay(anno),2,FUN=which)
+ora <- ORA(w, seq_along(g), sets, excludeUnannotated = FALSE)
+ora$expressed <- tools::toTitleCase(tolower(ora$Term)) %in% expressed
+ora2 <- ora[ora$expressed,1:6]
+p1 <- ggplot(ora2, aes(log2.enrichment, -log10(FDR), label=Term, alpha=FDR<0.01)) + 
+  geom_text(size=3) + coord_cartesian(xlim=c(0,2.15)) + 
+    scale_alpha_manual(values = c("FALSE"=0.2, "TRUE"=0.75)) + theme_bw() +
+  ggtitle("Motif enrichment")
+```
+
+```{r}
+brainTF <- readRDS("../extDat/brainTF.GR.rds")
+btanno <- sapply(split(brainTF, brainTF$TF), FUN=function(x) overlapsAny(g,x))
+sets2 <- apply(btanno,2,FUN=which)
+btora <- ORA(w, seq_along(g), sets2, excludeUnannotated = FALSE)
+p2 <- ggplot(btora, aes(log2.enrichment, -log10(FDR), label=Term, alpha=FDR<0.01)) + 
+    geom_text(size=3) + coord_cartesian(xlim=c(0,2.15)) + 
+    scale_alpha_manual(values = c("FALSE"=0.2, "TRUE"=0.75)) + theme_bw() + ggtitle("ChIP binding sites\nenrichment")
+btoraB <- ORA(w, seq_along(g), sets2, excludeUnannotated = TRUE)
+m <- merge(ora2, btora, by="Term", suffix=c(".motif",".chip"))
+m$meanFDR <- rowMeans(m[,grep("FDR",colnames(m))])
+m$meanLE <- rowMeans(m[,grep("enrichment",colnames(m))])
+p3a <- ggplot(m, aes(log2.enrichment.motif, log2.enrichment.chip, alpha=-meanFDR, label=Term)) + geom_text() + theme_bw()
+```
+
+```{r, fig.width=6, fig.height=4}
+saveRDS(m,"neuronal.early.TFen.rds")
+m <- readRDS("neuronal.early.TFen.rds")
+p3 <- ggplot(m, aes(meanLE, -log10(meanFDR), label=Term))  + geom_text(size=3) + theme_bw() +
+  coord_cartesian(xlim=c(0,1.8)) + labs(x="log2(enrichment)", y="mean -log10(FDR)") +
+  ggtitle("Motif & ChIP")
+```
+
+```{r, fig.width=11, fig.height=4}
+(p1 + p2 + p3) & theme(legend.position = "bottom")
+```
+
+
+Check for combinations with CREB1:
+
+```{r}
+sigsets <- sets[ora2$Term[which(ora2$FDR<0.01)]]
+csets <- setNames(lapply(seq_along(sigsets), FUN=function(j){
+    intersect(sigsets$CREB1,sigsets[[j]])
+  }), paste0("CREB1:",names(sigsets)))
+names(csets) <- gsub("CREB1:CREB1","CREB1",names(csets),fixed = TRUE)
+ora <- ORA(w, seq_along(g), csets, excludeUnannotated = FALSE)
+```
+
+```{r, eval=FALSE}
+CREB1:ZBTB10     751      14            3.39 1.285733e-10
+CREB1:KLF11     1425      18            2.83 1.580275e-10
+CREB1:ZBTB17    1268      17            2.92 2.102083e-10
+```
+
+
+
+```{r}
+sce$isActive <- sce$ADT>0.5
+names(cts) <- cts <- levels(pb$celltype)
+cts <- cts[!grepl("Mossy|Ccn2|CR$",cts)]
+pb <- scuttle::sumCountsAcrossCells(sce, colData(sce)[,c("Sample","Treatment","TimePoint","celltype","celltype2","isActive")])
+deas <- lapply(cts, FUN=function(ct){
+  e <- pb[,pb$celltype==ct & pb$isActive]
+  e$condition <- paste0(e$Treatment,e$TimePoint)
+  dds <- calcNormFactors(DGEList(assay(e)))
+  mm <- model.matrix(~0+condition, data=as.data.frame(colData(e)))
+  dds <- dds[filterByExpr(dds,mm),]
+  dds <- estimateDisp(dds,mm)
+  fit <- glmFit(dds,mm)
+  deas <- lapply(c(baseline="Control", "15min"="15min", "45min"="45min", "3h"="3h"), FUN=function(tp){
+    y <- rep(0,ncol(mm))
+    co <- paste0(c("conditionRestraint","conditionHandling"), tp)
+    y[which(colnames(mm)==co[1])] <- 1
+    y[which(colnames(mm)==co[2])] <- -1
+    as.data.frame(topTags(glmLRT(fit, contrast=y),Inf))
+  })
+})
+
+deas2 <- dplyr::bind_rows(lapply(deas, FUN=function(x){
+  dplyr::bind_rows(lapply(x, FUN=function(x){
+    x$gene <- row.names(x)
+    row.names(x) <- NULL
+    x
+  }), .id="Comparison")
+}), .id="celltype")
+deas2 <- deas2[order(deas2$PValue),-5]
+row.names(deas2) <- NULL
+deas2$Comparison <- factor(deas2$Comparison, c("baseline","15min","45min","3h"))
+saveRDS(deas2, file="activatedNeurons.pwDiffsInRestraint.rds")
+pb <- pb[,pb$isActive]
+pb <- pb[,!grepl("Mossy|Ccn2|Lamp5", pb$celltype)]
+colnames(pb) <- paste0(pb$celltype,pb$Sample)
+dds <- calcNormFactors(DGEList(assay(pb)))
+assays(pb)$logcpm <- log1p(edgeR::cpm(dds))
+pb$celltype2 <- pb$celltype <- droplevels(pb$celltype)
+levels(pb$celltype2) <- gsub("\\.|/","\n",levels(pb$celltype2))
+pb <- log2FC(pb, "logcpm", pb$TimePoint=="Control" & pb$Treatment=="Handling", by=pb$celltype)
+pb <- pb[,order(pb$celltype, pb$TimePoint, pb$Treatment)]
+saveRDS(pb, file="activatedNeurons.PB.rds")
+```
+
+```{r, fig.width=10, fig.height=6}
+
+deas2$celltype2 <- gsub("\\.|/","\n",deas2$celltype)
+dea2 <- dplyr::bind_rows(lapply(split(deas2, paste(deas2$Comparison,deas2$celltype)), FUN=function(x){
+  x <- x[which(x$FDR<0.05),]
+  head(x[order(x$FDR),],5)
+}))
+
+
+receptors <- lapply(
+  list(Serotonin="Htr1f|Htr4|Htr7|Htr2a|Htr1a|Htr2c|Htr3a",
+        Glutamate="Grm5|Grm7|Grm1|Grm8|Grm3|Grm2",
+        GABA="Gabra1|Gabra5|Gabrb2|Gabrg3|Gabrg2|Gabra4|Gabrb3|Gabrb1|Gabra3|Gabra2|Gabrg1",
+        Dopamine="Drd1|Drd2|Drd4|Drd5",
+        AMPA="Gria",
+        Kainate="Grik",
+        NMDA="Grin2a|Grin2b|Grin1|Grin3a|Grina|Grin2d",
+        "(Nor)adrenaline"="Adra1b|Adra1a|Adra1d|Adra2c|Adrb1"), FUN=function(x){
+          grep(x, row.names(pb), value=TRUE)
+        })
+
+dear <- dplyr::bind_rows(lapply(split(deas2, paste(deas2$Comparison,deas2$celltype)), FUN=function(x){
+  x <- x[x$gene %in% unlist(receptors),]
+  x$FDR <- p.adjust(x$PValue)
+  x
+}))
+dear <- dear[order(dear$PValue),]
+dear2 <- dear[!grepl("InhN|Fn1|Tshz2|DG",dear$celltype),]
+dear3 <- dear[grepl("InhN",dear$celltype),]
+
+
+sechm(pb[,pb$celltype %in% unique(dear2$celltype)], dear2$gene[dear2$FDR<0.05], gaps_at="celltype2", top_annotation = c("TimePoint","Treatment"), assayName = "scaledLFC", do.scale = FALSE)
+```
+
+
+```{r}
+pb <- readRDS(file="activatedNeurons.PB.rds")
+names(cts) <- cts <- levels(droplevels(pb$celltype))
+cts <- cts[!grepl("Mossy|Ccn2|CR$",cts)]
+deas3 <- lapply(cts, FUN=function(ct){
+  e <- pb[,pb$celltype==ct & pb$isActive]
+  dds <- calcNormFactors(DGEList(assay(e)))
+  mm <- model.matrix(~TimePoint*Treatment, data=as.data.frame(colData(e)))
+  dds <- dds[filterByExpr(dds,mm),]
+  dds <- estimateDisp(dds,mm)
+  fit <- glmFit(dds,mm)
+  names(cos) <- cos <- colnames(mm)[2:4]
+  deas <- lapply(cos, FUN=function(co){
+    as.data.frame(topTags(glmLRT(fit, co),Inf))
+  })
+})
+dea3 <- dplyr::bind_rows(lapply(deas3, FUN=function(x){
+  dplyr::bind_rows(lapply(x, FUN=function(x){
+    x$gene <- row.names(x)
+    row.names(x) <- NULL
+    x
+  }), .id="Comparison")
+}), .id="celltype")
+
+dear <- dplyr::bind_rows(lapply(split(dea3, paste(dea3$Comparison,dea3$celltype)), FUN=function(x){
+  x <- x[x$gene %in% unlist(receptors),]
+  x$FDR <- p.adjust(x$PValue)
+  x
+}))
+dear <- dear[order(dear$PValue),]
+
+```
+
+
+
+```{r, fig.width=8, fig.height=5}
+pb <- readRDS("GEX_analysis/neuronal.celltype.PB.rds")
+ggplot(meltSE(pb, "Crh", rowDat.columns = NA), aes(celltype, logcpm, fill=TimePoint)) + geom_boxplot() + theme_bw() + ggtitle("Chr")
+
+sce <- readRDS("GEX_analysis/neuronal.SCE.rds")
+sce$Crhr1 <- assay(sce)["Crhr1",]>0
+cd <- as.data.frame(colData(sce)[which(sce$Crhr1 & grepl("^ExN",sce$celltype)),])
+ag <- aggregate(cd$ADT, by=cd[,c("Sample","TimePoint","Treatment")], FUN=function(x){ sum(x>0.5)/length(x) })
+ggplot(ag, aes(TimePoint, x, fill=Treatment)) + geom_boxplot() + theme_bw() +
+  labs(title="Crhr1+ ExN activation", y="Proportion activated")
+
+ag <- aggregate(cd$ADT, by=cd[,c("Sample","TimePoint","Treatment", "celltype2")], FUN=function(x){ sum(x>0.5)/length(x) })
+ggplot(ag, aes(TimePoint, x, fill=Treatment)) + geom_boxplot() + theme_bw() + coord_cartesian(ylim=c(0,0.7)) +
+  labs(title="Crhr1+ ExN activation", y="Proportion activated") + facet_wrap(~celltype2)
+```
+
+
+# Motif acc across timepoints
+
+```{r}
+dev <- readRDS("ATAC/celltype_cvDevs_neuronal.rds")
+dev2 <- readRDS("ATAC/celltype_cvDevs_nonNeuronal.rds")
+dev <- c(dev,dev2)
+dev <- dev[!grepl("PVM|other|cycling|CR",names(dev))]
+# tmpdev <- do.call(rbind, lapply(names(dev), \(n){ x <- dev[[n]]; rowData(x)$celltype <- n; x}))
+# tmp <- rowData(tmpdev)$celltype
+set.seed(42)
+tmpdev <- do.call(cbind, lapply(dev, \(x){ x <- as(x,"SummarizedExperiment"); rowData(x) <- NULL; x}))
+tmpdev <- SEtools::svacor(tmpdev, ~group_id*Treatment, assayName = "z", useVST = FALSE, n.sv=1)
+#rowData(tmpdev)$celltype <- tmp
+#anyRes <- lapply(split(seq_len(nrow(tmpdev)), rowData(tmpdev)$celltype), FUN=function(x){
+anyRes <- lapply(dev, FUN=function(x){
+  #a <- assay(tmpdev[rowData(tmpdev)$celltype==x$cluster_id[1],], "corrected")
+  x2 <- tmpdev[,tmpdev$cluster_id==x$cluster_id[1]]
+  assay(x,"corrected") <- assay(x2, "corrected")
+  stopifnot(all(colnames(x)==colnames(x2)))
+  x$SV1 <- x2$SV1
+  x <- x[,order(x$group_id, x$Treatment)]
+  mm <- model.matrix(~SV1+group_id*Treatment, data=as.data.frame(colData(x)))
+  fit <- eBayes(lmFit(assays(x)$z, mm))
+  stressAny <- as.data.frame(topTable(fit, colnames(mm)[3:5], Inf))
+  crsAny <- as.data.frame(topTable(fit, colnames(mm)[6:9], Inf))
+  x <- log2FC(x, "corrected", x$group_id=="Control" & x$Treatment=="Handling", isLog = TRUE)
+  list(se=x, ars=stressAny, crs=crsAny)
+})
+ars <- dplyr::bind_rows(lapply(anyRes, FUN=\(x){
+  da <- x$ars
+  da$feature <- row.names(da)
+  da
+}), .id="cluster_id")
+ars2 <- ars[which(ars$adj.P.Val<0.05 & apply(abs(ars[,2:4]),1,max)>=10),]
+se1 <- do.call(cbind, lapply(anyRes, FUN=\(x){
+  rowData(x$se) <- NULL;
+  as(x$se,"SummarizedExperiment")
+}))
+```
+
+```{r}
+dev <- readRDS("ATAC/celltype_cvDevs_neuronal.rds")
+dev2 <- readRDS("ATAC/celltype_cvDevs_nonNeuronal.rds")
+dev <- c(dev,dev2)
+dev <- dev[!grepl("PVM|other|cycling|CR",names(dev))]
+anyRes <- lapply(dev, FUN=function(x){
+  x <- x[,order(x$group_id, x$Treatment)]
+  mm <- model.matrix(~group_id*Treatment, data=as.data.frame(colData(x)))
+  fit <- eBayes(lmFit(assays(x)$z, mm))
+  stressAny <- as.data.frame(topTable(fit, colnames(mm)[3:5-1], Inf))
+  crsAny <- as.data.frame(topTable(fit, colnames(mm)[6:9-1], Inf))
+  x <- log2FC(x, "z", x$group_id=="Control" & x$Treatment=="Handling", isLog = TRUE)
+  list(se=x, ars=stressAny, crs=crsAny)
+})
+ars <- dplyr::bind_rows(lapply(anyRes, FUN=\(x){
+  da <- x$ars
+  da$feature <- row.names(da)
+  da
+}), .id="cluster_id")
+ars2 <- ars[which(ars$adj.P.Val<0.05),]
+se1 <- do.call(cbind, lapply(anyRes, FUN=\(x){
+  rowData(x$se) <- NULL;
+  as(x$se,"SummarizedExperiment")
+}))
+```
+
+
+```{r, fig.height=10, fig.width=10}
+d <- meltSE(se1, unique(ars2$feature), rowDat.columns = NA)
+d <- merge(ars2[,c("cluster_id","feature")], d, by=c("cluster_id","feature"))
+d$facet <- paste0(d$feature, " in ", gsub("ExN\\.","",d$cluster_id))
+d$Sample <- gsub("\\..+","",d$sample)
+d$Sample <- factor(d$Sample, unique(d$Sample[order(d$group_id,d$Treatment)]))
+d$TimePoint <- d$group_id
+d2 <- reshape2::dcast(d, facet~Sample, value.var = "scaledLFC", fun.aggregate = mean)
+row.names(d2) <- d2[,1]
+tmp <- d[!duplicated(d$Sample),]
+row.names(tmp) <- tmp$Sample
+
+se <- SummarizedExperiment(list(scaledLFC=as.matrix(d2[,-1])), colData=tmp[colnames(d2)[-1],c("TimePoint","Treatment")])
+rowData(se)$celltype <- gsub(".+ in ","",row.names(se))
+#metadata(se) <- metadata(pb)
+h <- sechm(se, unique(d$facet[grep("InhN|ExN",d$cluster_id)]), gaps_at="TimePoint", hmcols=c("blue","black","yellow"),
+           column_title_gp=gpar(fontsize=11), row_title_gp=gpar(fontsize=10),
+            row_names_gp=gpar(fontsize=8), gaps_row = "celltype", row_title_rot = 0, row_names_max_width = unit(2, "cm"), show_rownames = TRUE, width=unit(5.8,"cm"), show_heatmap_legend=FALSE, show_annotation_legend = FALSE)
+h@row_names_param$anno@var_env$value <- gsub(" in .+","",h@row_names_param$anno@var_env$value)
+h2 <- sechm(se, unique(d$facet[grep("InhN|ExN",d$cluster_id,invert=TRUE)]), gaps_at="TimePoint", 
+            column_title_gp=gpar(fontsize=11), row_title_gp=gpar(fontsize=10),hmcols=c("blue","black","yellow"),
+            row_names_gp=gpar(fontsize=9), gaps_row = "celltype", row_title_rot = 0, row_names_max_width = unit(2, "cm"), show_rownames = TRUE, width=unit(5.8,"cm"))
+h2@row_names_param$anno@var_env$value <- gsub(" in .+","",h2@row_names_param$anno@var_env$value)
+
+plot_grid(
+  grid.grabExpr(draw(h, merge=TRUE), wrap.grobs = TRUE),
+  grid.grabExpr(draw(h2, merge=TRUE)), nrow=1
+)
+
+# tmp <- meltSE(se1, row.names(se1))
+# ggplot(tmp, aes(mad, colour=group_id, group=sample_id)) + geom_density(size=1.1) + 
+#   facet_wrap(~cluster_id) + xlim(c(-5,5))
+```
+
+## CRS
+
+```{r}
+crs <- dplyr::bind_rows(lapply(anyRes, FUN=\(x){
+  da <- x$crs
+  da$feature <- row.names(da)
+  da
+}), .id="cluster_id")
+crs2 <- crs[which(crs$adj.P.Val<0.05),]
+```
+
+```{r, fig.height=7, fig.width=10}
+d <- meltSE(se1, unique(crs2$feature), rowDat.columns = NA)
+d <- merge(crs2[,c("cluster_id","feature")], d, by=c("cluster_id","feature"))
+d$facet <- paste0(d$feature, " in ", gsub("ExN\\.","",d$cluster_id))
+d$Sample <- gsub("\\..+","",d$sample)
+d$Sample <- factor(d$Sample, unique(d$Sample[order(d$group_id,d$Treatment)]))
+d$TimePoint <- d$group_id
+d2 <- reshape2::dcast(d, facet~Sample, value.var = "scaledLFC", fun.aggregate = mean)
+row.names(d2) <- d2[,1]
+tmp <- d[!duplicated(d$Sample),]
+row.names(tmp) <- tmp$Sample
+
+se <- SummarizedExperiment(list(scaledLFC=as.matrix(d2[,-1])), colData=tmp[colnames(d2)[-1],c("TimePoint","Treatment")])
+rowData(se)$celltype <- gsub(".+ in ","",row.names(se))
+#metadata(se) <- metadata(pb)
+h <- sechm(se, unique(d$facet[grep("InhN|ExN",d$cluster_id)]), gaps_at="TimePoint", hmcols=c("blue","black","yellow"),
+           column_title_gp=gpar(fontsize=11), row_title_gp=gpar(fontsize=10),
+            row_names_gp=gpar(fontsize=8), gaps_row = "celltype", row_title_rot = 0, row_names_max_width = unit(2, "cm"), show_rownames = TRUE, width=unit(5.8,"cm"), show_heatmap_legend=FALSE, show_annotation_legend = FALSE)
+h@row_names_param$anno@var_env$value <- gsub(" in .+","",h@row_names_param$anno@var_env$value)
+h2 <- sechm(se, unique(d$facet[grep("InhN|ExN",d$cluster_id,invert=TRUE)]), gaps_at="TimePoint", 
+            column_title_gp=gpar(fontsize=11), row_title_gp=gpar(fontsize=10),hmcols=c("blue","black","yellow"),
+            row_names_gp=gpar(fontsize=9), gaps_row = "celltype", row_title_rot = 0, row_names_max_width = unit(2, "cm"), show_rownames = TRUE, width=unit(5.8,"cm"))
+h2@row_names_param$anno@var_env$value <- gsub(" in .+","",h2@row_names_param$anno@var_env$value)
+
+plot_grid(
+  grid.grabExpr(draw(h, merge=TRUE), wrap.grobs = TRUE),
+  grid.grabExpr(draw(h2, merge=TRUE)), nrow=1
+)
+```
+
+
+
+```{r}
+x <- do.call(cbind,split(se1$SV1,se1$cluster_id))
+```
+

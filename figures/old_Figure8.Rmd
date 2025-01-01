@@ -1,0 +1,253 @@
+---
+title: 'Figure 7 : sc'
+output: html_document
+date: "2024-10-27"
+---
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(RColorBrewer)
+})
+theme_set(theme_bw())
+source("../scMultiome/GEX_analysis/functions.R")
+source("../functions/functions.R")
+
+cols <- c("Handling"="darkgrey", "Restraint"="#0000CD96")
+```
+
+
+
+```{r, fig.width=14, fig.height=6}
+a <- readRDS("../scMultiome/ATAC/celltype_cvDevs_neuronal.rds")
+se <- do.call(cbind, lapply(a, FUN=function(x){
+  x <- as(x, Class="SummarizedExperiment")
+  rowData(x) <- NULL
+  SEtools::svacor(x, ~group_id*Treatment, assayName = "centered", useVST=FALSE, n.sv = 1)
+}))
+#se <- se[,se$cluster_id %in% gex$cluster_id]
+se <- se[,!grepl("Sema3c|Mossy|Camk2d",se$cluster_id)]
+se$celltype2 <- gsub("\\.|/","\n",se$cluster_id)
+se <- log2FC(se, "corrected", controls=se$group_id=="Control", by = se$cluster_id, isLog = TRUE)
+se <- se[,order(se$cluster_id,se$group_id,se$Treatment)]
+se$TimePoint <- se$group_id
+
+gse <- readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds")
+dea <- readRDS("../scMultiome/GEX_analysis/neuronal.DEA.rds")
+gse <- gse[,gse$celltype %in% res$cluster_id]
+
+metadata(se) <- metadata(gse)
+colnames(se) <- paste0(se$cluster_id, ".", se$sample_id)
+si <- intersect(colnames(gse),colnames(se))
+se <- se[,si]
+gse <- gse[,si]
+metadata(gse)$hmcols <- colorspace::diverging_hcl(101,"Blue-Red 3")
+metadata(se)$hmcols <- c("blue","black","yellow")
+w <- grepl("Tshz3",se$celltype2)
+se$celltype2 <- gsub("/","\n",se$cluster_id)
+se$celltype3 <- gsub("/|\\.","\n",se$cluster_id)
+gse$celltype2 <- gsub("/|\\.","\n",gse$celltype)
+
+hm <- grid.grabExpr(draw(
+  sechm(se[,!w], c("GCR","HTF4", "BACH1", "MAFG", "CREB1", "MCR", "JUNB","FOS","RXRA","SP1","ATF2","EGR1","FOSB", "E4F1"), name="Motif\nscaledLFC",
+        row_title="motif ATAC", assayName="scaledLFC", gaps_at="celltype3", top_annotation=c("TimePoint","Treatment"),
+        column_title_gp=gpar(fontsize = 10), row_names_gp = gpar(fontsize = 9.5), 
+      heatmap_legend_param=list(legend_direction="horizontal")) %v%
+  sechm(gse[,!w], c("Egr1","Fosb","Npas4", "Egr4", "Fos", "Btg2", "Dusp5", "Junb"), top_annotation=NA,
+      name="RNA\nscaledLFC", row_title="gene RNA", row_names_gp = gpar(fontsize = 9.5), 
+      assayName="scaledLFC", gaps_at="celltype2", bottom_annotation=c("Treatment","TimePoint"),
+      heatmap_legend_param=list(legend_direction="horizontal")),
+  merge=TRUE, heatmap_legend_side="bottom", annotation_legend_side="bottom"))
+plot_grid(hm)
+```
+
+
+
+
+
+
+
+
+
+```{r, fig.width=10, fig.height=5}
+res <- readRDS("../scMultiome/GEX_analysis/neuronal.DEA.rds")
+pb <- readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds")
+pb$celltype2 <- gsub("/","\n",pb$celltype)
+cls <- as.character(res$cluster_id[which(res$gene=="Fkbp5" & res$ihw<0.15)])
+d1 <- meltSE(pb[,pb$celltype %in% cls], "Fkbp5", rowDat.columns = NA)
+d1$class <- "neuronal"
+
+resn <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.DEA.rds")
+pbn <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.celltype.PB.rds")
+pbn$celltype2 <- pbn$celltype
+pbn <- log2FC(pbn, "logcpm", pbn$Treatment=="Handling" & pbn$TimePoint=="Control", by=pbn$celltype2)
+cls <- as.character(resn$cluster_id[which(resn$gene=="Fkbp5" & resn$ihw<0.05)])
+d2 <- meltSE(pbn[,pbn$celltype %in% cls], "Fkbp5", rowDat.columns = NA)
+d2$class <- "non-neuronal"
+i <- intersect(colnames(d1), colnames(d2)); d <- rbind(d1[,i], d2[,i])
+
+f1 <- ggplot(d, aes(TimePoint, scaledLFC, fill=Treatment)) + 
+  stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment))  + 
+  geom_boxplot() + facet_wrap(~celltype2, nrow=1, scales = "free_y") + theme_bw() + labs(y="Fkbp5 scaled log2(FC)") +
+  scale_color_manual(values=cols) + scale_fill_manual(values=cols) + scale_x_discrete() +
+  theme(legend.position = "none", axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+f1
+```
+
+
+```{r, fig.width=14, fig.height=6}
+a <- readRDS("../scMultiome/ATAC/celltype_cvDevs_neuronal.rds")
+se <- do.call(cbind, lapply(a, FUN=function(x){
+  x <- as(x, Class="SummarizedExperiment")
+  rowData(x) <- NULL
+  SEtools::svacor(x, ~group_id*Treatment, assayName = "centered", useVST=FALSE, n.sv = 1)
+}))
+#se <- se[,se$cluster_id %in% gex$cluster_id]
+se <- se[,!grepl("Sema3c|Mossy|Camk2d",se$cluster_id)]
+se$celltype2 <- gsub("\\.|/","\n",se$cluster_id)
+se <- log2FC(se, "corrected", controls=se$group_id=="Control", by = se$cluster_id, isLog = TRUE)
+se <- se[,order(se$cluster_id,se$group_id,se$Treatment)]
+se$TimePoint <- se$group_id
+
+gse <- readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds")
+dea <- readRDS("../scMultiome/GEX_analysis/neuronal.DEA.rds")
+gse <- gse[,gse$celltype %in% res$cluster_id]
+
+metadata(se) <- metadata(gse)
+colnames(se) <- paste0(se$cluster_id, ".", se$sample_id)
+si <- intersect(colnames(gse),colnames(se))
+se <- se[,si]
+gse <- gse[,si]
+metadata(gse)$hmcols <- colorspace::diverging_hcl(101,"Blue-Red 3")
+metadata(se)$hmcols <- c("blue","black","yellow")
+w <- grepl("Tshz3",se$celltype2)
+se$celltype2 <- gsub("/","\n",se$cluster_id)
+se$celltype3 <- gsub("/|\\.","\n",se$cluster_id)
+gse$celltype2 <- gsub("/|\\.","\n",gse$celltype)
+
+hm <- grid.grabExpr(draw(
+  sechm(se[,!w], c("GCR","HTF4", "BACH1", "MAFG", "CREB1", "MCR", "JUNB","FOS","RXRA","SP1","ATF2","EGR1","FOSB", "E4F1"), name="Motif\nscaledLFC",
+        row_title="motif ATAC", assayName="scaledLFC", gaps_at="celltype3", top_annotation=c("TimePoint","Treatment"),
+        column_title_gp=gpar(fontsize = 10), row_names_gp = gpar(fontsize = 9.5), 
+      heatmap_legend_param=list(legend_direction="horizontal")) %v%
+  sechm(gse[,!w], c("Egr1","Fosb","Npas4", "Egr4", "Fos", "Btg2", "Dusp5", "Junb"), top_annotation=NA,
+      name="RNA\nscaledLFC", row_title="gene RNA", row_names_gp = gpar(fontsize = 9.5), 
+      assayName="scaledLFC", gaps_at="celltype2", bottom_annotation=c("Treatment","TimePoint"),
+      heatmap_legend_param=list(legend_direction="horizontal")),
+  merge=TRUE, heatmap_legend_side="bottom", annotation_legend_side="bottom"))
+plot_grid(hm)
+```
+
+
+
+```{r, fig.width=14, fig.height=5}
+sechm(se[,!w], unique(unlist(tfSets)), name="Motif\nscaledLFC",
+        row_title="motif ATAC", assayName="scaledLFC", gaps_at="celltype2", top_annotation=c("TimePoint","Treatment"),
+      heatmap_legend_param=list(legend_direction="horizontal"))
+```
+
+
+```{r, fig.width=10, fig.height=5}
+clustRes <- readRDS("../scMultiome/ATAC/treeclimbR_results.rds")
+clustRes2TipList <- function(clustRes){
+  lapply(clustRes, FUN=function(x){
+    names(cos) <- cos <- names(x$significant_nodes)
+    lapply(cos, FUN=function(co){
+      lapply(x$significant_nodes[[co]], FUN=function(n){
+        geiger::tips(x$pruned_trees[[co]],n)
+      })
+    })
+  })
+}
+tfSets <- clustRes2TipList(clustRes)
+tfSets <- lapply(tfSets[intersect(names(tfSets), unique(res$cluster_id))], \(x) unique(unlist(x)))
+cls <- setdiff(names(tfSets)[sapply(tfSets, \(x) any(x=="GCR"))], c("ExN.IT/Slc4a4/Tshz3", "InhN.Adarb2"))
+
+d <- meltSE(se[,se$cluster_id %in% cls], "GCR", rowDat.columns = NA)
+
+gcr <- ggplot(d, aes(TimePoint, scaledLFC, fill=Treatment)) + 
+  stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment))  + 
+  geom_boxplot() + facet_wrap(~celltype2, nrow=2, scales = "free_y") + theme_bw() + labs(y="Scaled log2(FC) in GCR motif accessibility") +
+  scale_color_manual(values=cols) + scale_fill_manual(values=cols) + scale_x_discrete() +
+  theme(legend.position = "none", axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+
+gcr
+```
+
+```{r}
+a <- readRDS("../scMultiome/ATAC/celltype_cvDevs_nonNeuronal.rds")
+se2 <- do.call(cbind, lapply(a[c("astrocytes","microglia","oligodendrocyte","OPC","vascular")], FUN=function(x){
+  x <- as(x, Class="SummarizedExperiment")
+  rowData(x) <- NULL
+  SEtools::svacor(x, ~group_id*Treatment, assayName = "centered", useVST=FALSE, n.sv = 1)
+}))
+se2 <- log2FC(se2, "corrected", controls=se2$group_id=="Control", by = se2$cluster_id, isLog = TRUE)
+se2 <- se2[,order(se2$cluster_id,se2$group_id,se2$Treatment)]
+se2$TimePoint <- se2$group_id
+
+d2 <- meltSE(se2, "GCR", rowDat.columns = NA)
+d2$celltype2 <- d2$cluster_id
+
+i <- intersect(colnames(d), colnames(d2)); dd <- rbind(d[,i], d2[,i])
+
+dd$celltype2 <- factor(dd$celltype2, c(sort(unique(d$celltype2)),sort(unique(d2$celltype2))))
+dd <- dd[dd$celltype2!="OPC",]
+
+gcr <- ggplot(dd, aes(TimePoint, scaledLFC, fill=Treatment)) + 
+  stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment))  + 
+  geom_boxplot() + facet_wrap(~celltype2, nrow=2, scales = "free_y") + theme_bw() + labs(y="Scaled log2(FC) in GCR motif accessibility") +
+  scale_color_manual(values=cols) + scale_fill_manual(values=cols) + scale_x_discrete() +
+  theme(legend.position=c(1, 0), legend.justification=c(1, 0),
+        axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+```
+
+```{r}
+cls <- names(tfSets)[sapply(tfSets, \(x) any(x=="HTF4"))]
+d <- meltSE(se[,which(se$cluster_id %in% cls)], "HTF4", rowDat.columns = NA)
+htf4 <- ggplot(d, aes(TimePoint, scaledLFC, fill=Treatment)) + 
+  stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment))  + 
+  geom_boxplot() + facet_wrap(~celltype2, nrow=1, scales = "free_y") + theme_bw() + labs(y="Scaled log2(FC) in\nHTF4 motif accessibility") +
+  scale_color_manual(values=cols) + scale_fill_manual(values=cols) + scale_x_discrete() +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5), legend.position = "none")
+htf4
+```
+
+```{r}
+pbn <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.broad.PB.rds")
+d1 <- meltSE(pb, "Nr3c1", rowDat.columns = NA)
+d2 <- meltSE(pbn, "Nr3c1", rowDat.columns = NA)
+ag <- aggregate(rbind(d1[,c("logcpm","ncells")], d2[,c("logcpm","ncells")]), by=list(celltype=c(as.character(d1$celltype2), as.character(d2$broadClass))), FUN=median)
+d1 <- meltSE(se, "GCR", rowDat.columns = NA)
+d2 <- meltSE(se2, "GCR", rowDat.columns = NA)
+f <- c("TimePoint","cluster_id","deviations","z","log2FC","scaledLFC")
+dd <- rbind(d1[,f],d2[,f])
+dd <- dd[dd$TimePoint=="45min",]
+ag2 <- aggregate(dd[,-1], by=list(celltype=gsub("/","\n",dd$cluster_id)), FUN=median)
+m <- merge(ag,ag2,by="celltype")
+m$celltype2 <- gsub("\\..+","",m$celltype)
+
+mod <- summary(lm(log2FC~logcpm, data=m))
+otherCols <- c(InhN="#E69F00", astrocytes="#009E73",  microglia="#F0E442", oligodendrocyte="#56B4E9",  OPC="#0072B2", ExN="#D55E00", vascular="#CC79A7")
+grcor <- ggplot(m, aes(logcpm, log2FC)) + geom_smooth(method=MASS::rlm, alpha=0.2) + 
+  theme_bw() + geom_point(aes(colour=celltype2), size=3) +
+  scale_color_manual(values=otherCols) + 
+  annotate("text", label=paste0("p=",round(coef(mod)[2,4],3)),
+           x=3.5,y=23,hjust=0) +
+  labs(x="Nr3c1 (GR) expression (logcpm)", y="Relative change in\nGR motif accessibility",
+       colour="Broad cell type")
+```
+
+
+```{r, fig.width=10, fig.height=14}
+plot_grid(
+  f1,
+  hm,
+  gcr,
+  plot_grid(grcor, htf4, rel_widths = c(1,1), scale=0.95, nrow=1, labels=c("D","E")),
+  labels="AUTO", scale=c(rep(0.95,3),1), nrow=4, rel_heights=c(1.9,4,3,1.6)
+)
+```
+
