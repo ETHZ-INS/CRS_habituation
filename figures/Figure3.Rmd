@@ -67,7 +67,6 @@ Damping patterns:
 
 ```{r}
 dp <- readRDS("../rnaDEAs/full.dampingClusters.rds")
-dp <- dp[c(3,1,2)]
 names(dp) <- paste0("cluster ", 1:3, ":\n", names(dp))
 rowData(se)$cluster <- rep(factor(NA,names(dp)),nrow(se))
 rowData(se)[unlist(dp),"cluster"] <- rep(names(dp),lengths(dp))
@@ -91,7 +90,7 @@ ora <- dplyr::bind_rows(lapply(enr$vsExpressed$ORA, FUN=function(x){
   x
 }), .id="Cluster")
 ora$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",ora$pathway)))
-ora$Cluster <- factor(ora$Cluster, unique(ora$Cluster)[c(3,1,2)])
+ora$Cluster <- factor(ora$Cluster, unique(ora$Cluster))
 
 
 gl.enrP <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
@@ -211,7 +210,13 @@ metadata(sli)$anno_colors$TimePoint <- metadata(tmp)$anno_colors$TimePoint <-
   setNames(RColorBrewer::brewer.pal(7,"YlOrRd"), c("0min","30min","45min","60min","1h30","120min","3h"))
 metadata(sli)$anno_colors$Treatment <- c(Control="white", Forskolin="black")
 
-hm2 <- sechm(tmp, lapply(dp,intersect,y=row.names(sli)), assayName="log2FC",
+dp <- lapply(lapply(dp,intersect,y=row.names(sli)), FUN=function(g){
+  x <- cbind(assay(tmp, "log2FC")[g,],assay(sli, "log2FC")[g,])
+  return(row.names(sortRows(x)))
+  #g[hclust(dist(x))$order]
+})
+
+hm2 <- sechm(tmp, dp, assayName="log2FC", sortRowsOn = NULL, cluster_rows = FALSE,
              top_annotation = c("TimePoint","Treatment"), breaks=0.985, row_title_rot = 0,
              width=unit(5,"cm"), column_title="ARS in vivo vHC", isMult = TRUE) + 
   sechm(sli, dp, assayName="log2FC", top_annotation=c("TimePoint","Treatment"),

@@ -64,11 +64,6 @@ h2@row_names_param$anno@var_env$value <- gsub(" in .+","",h2@row_names_param$ann
 ```
 
 ```{r, fig.height=12, fig.width=10}
-cols <- c("Handling +ARS"="darkgrey", "CRS +ARS"="#0000CD96")
-sel1 <- c("Fos in CA1-ve-ProS", "Fosb in CA1-ve-ProS", "Npas4 in CA1-ve-ProS", "Fkbp5 in microglia", "Egr1 in InhN.Pvalb","Cdkn1a in vascular")
-sel2 <- c("Cacna1e in InhN.Pvalb", "Zfhx2 in OPC", "Pde1a in InhN.Vip", "Erbb4 in Mossy", "Vwf in vascular")
-res2$sig <- paste0("FDR=",gsub("e-0", "e-", sprintf("%.0e", res2$ihw)))
-
 plotGenes <- function(facets, nrow=1, qR=FALSE, ...){
   d2 <- d[d$facet %in% facets,]
   d2$facet <- factor(d2$facet, facets)
@@ -84,13 +79,32 @@ plotGenes <- function(facets, nrow=1, qR=FALSE, ...){
     theme(..., axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
 }
 
+res2$sig <- paste0("FDR=",gsub("e-0", "e-", sprintf("%.0e", res2$ihw)))
+res2A <- res2
+
+cols <- c("Handling +ARS"="darkgrey", "CRS +ARS"="#0000CD96")
+sel1 <- c("Fos in CA1-ve-ProS", "Fosb in CA1-ve-ProS", "Npas4 in CA1-ve-ProS", "Fkbp5 in microglia", "Egr1 in InhN.Pvalb","Cdkn1a in vascular")
+
+p1 <- plotGenes(sel1, legend.position="none")
+
+# sel2 <- c("Cacna1e in InhN.Pvalb", "Zfhx2 in OPC", "Pde1a in InhN.Vip", "Erbb4 in Mossy", "Vwf in vascular")
+res2 <- res[which(res$Comparison=="TreatmentRestraint" & res$ihw<0.05 & res$logCPM>=2 & 
+                  res$maxlfc>log2(1.25) & !grepl("cycling|other|PVM|Tshz2",res$cluster_id)),]
+res2$celltype <- res2$cluster_id
+res2$facet <- paste0(res2$gene, " in ", gsub("ExN\\.","",res2$celltype))
+res2 <- res2[order(res2$ihw),]
+res2 <- dplyr::bind_rows(lapply(split(res2,res2$celltype), head, n=3))
+res2$sig <- paste0("FDR=",gsub("e-0", "e-", sprintf("%.0e", res2$ihw)))
+p2 <- plotGenes(res2$facet, qR=TRUE)
+
+
 pdf("Figure6.pdf", width=10, height=12)
 plot_grid(
   plot_grid(
     grid.grabExpr(draw(h, merge=TRUE)),
     grid.grabExpr(draw(h2, merge=TRUE)), nrow=1
   ),
-  plotGenes(sel1, legend.position="none"), plotGenes(sel2, qR=TRUE),
+  p1, p2,
   nrow=3, rel_heights = c(5,1.3,1.3), labels="AUTO", scale=0.95
 )
 dev.off()

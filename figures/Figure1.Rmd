@@ -114,18 +114,22 @@ m$minFDR <- rowMins(as.matrix(m[,grep("FDR",colnames(m))]))
 m <- m[which( (m$FDR.ars<0.05 & abs(m$logFC.ars)>=th.lfc) | 
                 (m$FDR.fss<0.05 & abs(m$logFC.fss)>=th.lfc) ),]
 m$TimePoint <- factor(m$TimePoint, names(fs.deas))
-cors <- sapply(split(m,m$TimePoint), FUN=function(x){
-  cor(x$logFC.ars, x$logFC.fss)
-})
-cors <- data.frame(TimePoint=factor(names(cors),levels(m$TimePoint)),
-                   cor=paste0("cor=",format(cors,digits=2)))
+cors <- t(sapply(split(m,m$TimePoint), FUN=function(x){
+  cc <- cor.test(x$logFC.ars, x$logFC.fss)
+  c(r=round(cc$estimate,2), p=format(cc$p.value, digit=1))
+}))
+cors <- data.frame(TimePoint=factor(row.names(cors),levels(m$TimePoint)),
+                   lab=paste0("r=",cors[,1], "\np=",cors[,2]))
 levels(m$TimePoint)[1] <- levels(cors$TimePoint)[1] <- "45min"
 lfcScatter <- ggplot(m, aes(logFC.fss, logFC.ars)) + 
   geom_vline(xintercept=0) + geom_hline(yintercept=0) + geom_abline(slope=1, linetype="dashed") +
   geom_point(aes(alpha=-log10(minFDR))) + geom_smooth(method=MASS::rlm, show.legend = FALSE) + 
   facet_wrap(~TimePoint) + coord_cartesian(xlim=c(-1.7,2), ylim=c(-1.7,2.5)) +
-  theme_bw() + geom_text(x=2, y=-1.6, hjust=1, data=cors, aes(label=cor)) +
+  theme_bw() + geom_text(x=2, y=-1.6, hjust=1, vjust=0, data=cors, aes(label=lab)) +
   labs(x="logFC in FSS", y="logFC in ARS") + theme(legend.position = "none")
+pdf("Figure1I_lfcScatter.pdf", height=2.5, width=8)
+lfcScatter
+dev.off()
 ```
 
 ```{r, fig.width=10, fig.height=2}

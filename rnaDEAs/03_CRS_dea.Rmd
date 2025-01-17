@@ -286,6 +286,17 @@ saveRDS(se, file="all.full.SE.rds")
 ```
 
 
+# Baseline differences using the screening step
+
+```{r, fig.width=7.5, fig.height=6}
+dea <- getDEA(stagedInteractions(se, screen, fullFit=fit, coefs="CRSTRUE"), "DEA.inter.CRSTRUE")
+sechm(se, row.names(dea)[which(dea$FDR<0.01)], assay="scaledLFC", gaps_at="TimePoint",
+      top_annotation=c("TimePoint","Treatment","Sex"), row_names_gp=gpar(fontsize=9))
+sechm(se, row.names(dea)[which(dea$FDR<0.01)], assay="log2FC", gaps_at="TimePoint",
+      top_annotation=c("TimePoint","Treatment","Sex"), row_names_gp=gpar(fontsize=9))
+```
+
+
 
 
 # Sex differences

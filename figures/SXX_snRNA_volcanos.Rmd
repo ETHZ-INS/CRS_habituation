@@ -28,20 +28,24 @@ dea2 <- dplyr::bind_rows(lapply(split(dea, paste(dea$Comparison,dea$cluster_id))
 }))
 dea$significance <- ifelse(dea$ihw<0.05, ifelse(dea$logFC>0,"upregulated","downregulated"),"n.s.")
 dea$significance <- factor(dea$significance, c("upregulated","n.s.","downregulated"))
-(p <- ggplot(dea, aes(logFC, -log10(ihw), colour=significance)) + geom_point_rast(size=1) + 
-  ggrepel::geom_text_repel(data=dea2, aes(label=gene), size=3, min.segment.length = 0, color="black") +
-  facet_wrap(~cluster_id+Comparison, nrow=9, dir="v") + theme_bw() +
-    scale_color_manual(values=setNames(c("darkblue","darkgrey","darkred"), levels(dea$significance))) +
-  labs(color="significance", y="-log10(FDR)") + scale_y_sqrt(breaks=c(2,5,10)) +
-    theme(legend.position="bottom"))
+
+dl <- split(dea, grepl("^ExN", dea$cluster_id) + 2*grepl("\\.CA", dea$cluster_id) + 10*grepl("^InhN", dea$cluster_id))[c("3","1","10","0")]
+doOneVp <- function(dea, legend=FALSE){
+  ggplot(dea, aes(logFC, -log10(ihw), colour=significance)) + geom_point_rast(size=1, raster.dpi = 150) + 
+    ggrepel::geom_text_repel(data=dea2[which(dea2$cluster_id %in% unique(dea$cluster_id)),,drop=FALSE], 
+                             aes(label=gene), size=3, min.segment.length = 0, color="black") +
+    facet_grid(Comparison~cluster_id) + theme_bw() +
+      scale_color_manual(values=setNames(c("darkred","darkgrey","darkblue"), levels(dea$significance))) +
+    labs(color="significance", y="-log10(FDR)") + scale_y_sqrt(breaks=c(2,5,10)) +
+      theme(legend.position=ifelse(legend,"right","none"), aspect.ratio=5/7)  
+}
+pp <- plot_grid(doOneVp(dl[[1]], TRUE) + coord_cartesian(xlim=c(-4,4)), doOneVp(dl[[2]]),
+          doOneVp(dl[[3]]), doOneVp(dl[[4]]), nrow=4)
 ```
 
 ```{r, fig.width=15, fig.height=20}
 pdf("SXX_snRNA_volcanosARS.pdf", width=15, height=20)
-(p <- ggplot(dea, aes(logCPM, logFC, colour=ihw<0.05)) + geom_point(size=1) + 
-  facet_wrap(~cluster_id+Comparison, nrow=9) + theme_bw() +
-    scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue"))) +
-  labs(color="significant")
+pp
 dev.off()
 ```
 
