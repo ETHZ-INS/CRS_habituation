@@ -58,11 +58,11 @@ gse$celltype2 <- gsub("/|\\.","\n",gse$celltype)
 
 
 hm <- grid.grabExpr(draw(
-  sechm(se, c("GCR","MEIS2", "USF2", "HTF4", "CREB1", "MCR", "JUND","FOS","RXRA","ATF2","EGR1"), name="Motif\nscaledLFC",
+  sechm(se, c("GCR","MEIS2", "USF2", "HTF4", "CREB1", "MCR", "JUND","FOS","RXRA","ATF2","EGR1"), name="Motif\nscaledLFC", use_raster=TRUE,
       row_title="motif ATAC", assayName="scaledLFC", gaps_at="celltype3", top_annotation=c("TimePoint","Treatment"),
       column_title_gp=gpar(fontsize = 10), row_names_gp = gpar(fontsize = 9.5), 
       heatmap_legend_param=list(legend_direction="horizontal"), breaks=0.998) %v% 
-  sechm(gse, c("Npas4", "Fos", "Btg2", "Junb"), top_annotation=NA,
+  sechm(gse, c("Npas4", "Fos", "Btg2", "Junb"), top_annotation=NA, use_raster=TRUE,
       name="RNA\nscaledLFC", row_title="IEGs RNA", row_names_gp = gpar(fontsize = 9.5), 
       assayName="scaledLFC", gaps_at="celltype2", bottom_annotation=c("Treatment","TimePoint"),
       heatmap_legend_param=list(legend_direction="horizontal")),
@@ -85,12 +85,12 @@ m$lab <- paste0("ARS q=", format(m$adj.P.Val, digit=1),"\n",
 
 gcr <- ggplot(d, aes(TimePoint, scaledLFC, fill=Treatment)) + 
   stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment))  + 
-  geom_boxplot() + facet_wrap(~cluster_id, nrow=3) + theme_bw() + labs(y="Relative GCR motif accessibility") +
+  geom_boxplot() + facet_wrap(~cluster_id, nrow=5) + theme_bw() + labs(y="Relative GCR motif accessibility") +
   scale_color_manual(values=cols) + scale_fill_manual(values=cols) + scale_x_discrete() +
   theme(legend.position=c(1, 0), legend.justification=c(1, 0),
         axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
-  coord_cartesian(ylim=c(-0.5,6)) +
-  geom_text(data=m, y=5.8, x=0.5, aes(label=lab), size=3, colour="black", hjust=0, vjust=1)
+  coord_cartesian(ylim=c(-0.5,6.2)) +
+  geom_text(data=m, y=6, x=0.5, aes(label=lab), size=2.8, colour="black", hjust=0, vjust=1)
 gcr
 ```
 
@@ -120,11 +120,56 @@ selmo <- ggplot(d, aes(TimePoint, scaledLFC)) +
 ```
 
 
+```{r}
+pb <- updateSEforPlots(readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds"))
+pbn <- updateSEforPlots(readRDS("../scMultiome/GEX_analysis/nonNeuronal.broad.PB.rds"))
+pbn$celltype <- pbn$broadClass
+load("../scMultiome/ATAC/motifAcc.RData")
+se1$celltype <- se1$cluster_id
+se1$Treatment <- paste(se1$Treatment, "+ARS")
+
+d1 <- rbind(cbind(feature="Nr3c1", value=assay(pb, "logcpm")["Nr3c1",], as.data.frame(colData(pb)[,c("TimePoint","Treatment","celltype")])),
+            cbind(feature="Nr3c1", value=assay(pbn, "logcpm")["Nr3c1",], as.data.frame(colData(pbn)[,c("TimePoint","Treatment","celltype")])),
+            cbind(feature="Fkbp5", value=assay(pb, "log2FC")["Fkbp5",], as.data.frame(colData(pb)[,c("TimePoint","Treatment","celltype")])),
+            cbind(feature="Fkbp5", value=assay(pbn, "log2FC")["Fkbp5",], as.data.frame(colData(pbn)[,c("TimePoint","Treatment","celltype")])),
+            cbind(feature="GRE", value=assay(se1, "deviations")["GCR",], as.data.frame(colData(se1)[,c("TimePoint","Treatment","celltype")])))
+d1$Treatment <- gsub("Restraint","CRS",d1$Treatment)
+d1 <- d1[!grepl("CR|PVM|other|cycling|Ccn2",d1$celltype),]
+
+d2 <- reshape2::dcast(d1, celltype~feature+TimePoint+Treatment, fun.aggregate = mean)
+dse <- SummarizedExperiment(list(log2FC=as.matrix(d2[,-1])))
+row.names(dse) <- d2[,1]
+dse$feature <- gsub("_.+","",colnames(dse))
+dse$Treatment <- relevel(factor(gsub(".+_","",colnames(dse))), "Handling +ARS")
+dse$TimePoint <- factor(sapply(strsplit(colnames(dse),"_"), \(x) x[2]), levels(pb$TimePoint))
+rowData(dse)$Nr3c1 <- rowMeans(assay(dse)[,dse$feature=="Nr3c1"])
+dse <- updateSEforPlots(dse[order(rowData(dse)$Nr3c1),])
+metadata(dse) <- metadata(pb)
+dse <- dse[,order(dse$TimePoint, dse$Treatment)]
+
+ac <- dse[,which(dse$feature=="GRE")]
+assayNames(ac) <- "relative\naccessibility"
+
+fk <- dse[,dse$feature=="Fkbp5"]
+assayNames(fk) <- "mRNA\nlog2FC"
+
+grh <- sechm(ac, row.names(dse), left_annotation = "Nr3c1",
+             top_annotation = c("TimePoint","Treatment"), bottom_annotation = c("Treatment","TimePoint"), 
+             column_title="GRE\naccessibility", isMult = TRUE, show_heatmap_legend=TRUE,
+             hmcols=c("darkblue","black","yellow"), sortRowsOn = NULL, cluster_rows = FALSE) + 
+  sechm(fk, row.names(dse), sortRowsOn = NULL, cluster_rows = FALSE, 
+        top_annotation = c("TimePoint","Treatment"), bottom_annotation = c("Treatment","TimePoint"), 
+        column_title="Fkbp5\nmRNA", breaks=0.995, row_names_gp=gpar(fontsize=10))
+```
+
 
 ```{r, fig.width=10, fig.height=14}
 pdf("Figure8.pdf", width=10, height=14)
-plot_grid(hm, selmo + coord_cartesian(ylim=c(-2.2,NA)), gcr, 
-          nrow=3, rel_heights=c(4,2.5,4), scale=0.95, labels="AUTO")
+plot_grid(hm,
+          selmo + coord_cartesian(ylim=c(-2.5,NA)) + theme(legend.position = "right", axis.title.x = element_blank()),
+          plot_grid(gcr + theme(legend.position="none", axis.title.x = element_blank()),
+                    grid.grabExpr(draw(grh, heatmap_legend_side="bottom", annotation_legend_side="bottom", merge=TRUE)), nrow=1, labels=c("C","D"), scale=c(1,0.95)),
+          nrow=3, rel_heights=c(4,2,6), scale=c(0.95,0.95,1), labels=c("A","B",NA))
 dev.off()
 ```
 

@@ -79,7 +79,7 @@ plotGenes <- function(facets, nrow=1, qR=FALSE, ...){
     theme(..., axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
 }
 
-res2$sig <- paste0("FDR=",gsub("e-0", "e-", sprintf("%.0e", res2$ihw)))
+res2$sig <- paste0("CRS q=",gsub("e-0", "e-", sprintf("%.0e", res2$ihw)))
 res2A <- res2
 
 cols <- c("Handling +ARS"="darkgrey", "CRS +ARS"="#0000CD96")
@@ -94,7 +94,7 @@ res2$celltype <- res2$cluster_id
 res2$facet <- paste0(res2$gene, " in ", gsub("ExN\\.","",res2$celltype))
 res2 <- res2[order(res2$ihw),]
 res2 <- dplyr::bind_rows(lapply(split(res2,res2$celltype), head, n=3))
-res2$sig <- paste0("FDR=",gsub("e-0", "e-", sprintf("%.0e", res2$ihw)))
+res2$sig <- paste0("CRS q=",gsub("e-0", "e-", sprintf("%.0e", res2$ihw)))
 p2 <- plotGenes(res2$facet, qR=TRUE)
 
 

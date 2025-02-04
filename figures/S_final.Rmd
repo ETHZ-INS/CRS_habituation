@@ -111,14 +111,16 @@ res <- readRDS("../scMultiome/GEX_analysis/neuronal.DEA.rds")
 pb <- readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds")
 pb <- updateSEforPlots(pb)
 pb$celltype2 <- gsub("/","\n",pb$celltype)
-cls <- as.character(res$cluster_id[which(res$gene=="Fkbp5" & res$ihw<0.05)])
+#cls <- as.character(res$cluster_id[which(res$gene=="Fkbp5" & res$ihw<0.05)])
+cls <- c("ExN.CA1-do", "ExN.SUB/Cntnap4")
 d1 <- meltSE(pb[,pb$celltype %in% cls], "Fkbp5", rowDat.columns = NA)
 d1$class <- "neuronal"
 
 resn <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.DEA.rds")
 pbn <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.celltype.PB.rds")
+pbn <- updateSEforPlots(pbn)
 pbn$celltype2 <- pbn$celltype
-pbn <- log2FC(pbn, "logcpm", pbn$Treatment=="Handling" & pbn$TimePoint=="Control", by=pbn$celltype2)
+pbn <- log2FC(pbn, "logcpm", pbn$Treatment=="Handling +ARS" & pbn$TimePoint=="Control", by=pbn$celltype2)
 cls <- as.character(resn$cluster_id[which(resn$gene=="Fkbp5" & resn$ihw<0.01)])
 d2 <- meltSE(pbn[,pbn$celltype %in% cls], "Fkbp5", rowDat.columns = NA)
 d2$class <- "non-neuronal"
@@ -133,14 +135,57 @@ m <- merge(d[!duplicated(d[,c("cluster_id","feature")]),], resa[resa$Comparison=
 m$lab <- paste0("ARS q=", format(m$ihw, digit=1),"\n",
                 "CRS q=", format(merge(m[,1:2], resa[resa$Comparison=="treatAny",])$ihw, digit=1))
 
+qp <- function(d, y=0.36){
+  m <- m[which(m$celltype2 %in% d$celltype2),]
+  ggplot(d, aes(TimePoint, log2FC)) + 
+  stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment))  +
+  geom_boxplot(aes(fill=Treatment)) + facet_wrap(~celltype2, nrow=1) + theme_bw() + labs(y="Fkbp5 scaled log2(FC)") +
+  geom_text(data=m, y=y, x=0.5, aes(label=lab), size=3, colour="black", hjust=0, vjust=1) +
+  scale_color_manual(values=cols) + scale_fill_manual(values=cols) + scale_x_discrete() +
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+}
+qp1 <- qp(d[d$class=="neuronal",]) + 
+  theme(axis.text.x=element_blank(), axis.title.x=element_blank(), axis.ticks.x=element_blank())
+(f1 <- qp1 / qp(d[d$class!="neuronal",], y=1.6) + plot_layout(guides="collect"))
+```
+
+```{r, fig.width=10, fig.height=5}
+res <- readRDS("../scMultiome/GEX_analysis/neuronal.DEA.rds")
+pb <- readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds")
+pb <- updateSEforPlots(readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.rds"))
+pb$celltype2 <- gsub("/","\n",pb$celltype)
+cls <- as.character(res$cluster_id[which(res$gene=="Fkbp5" & res$ihw<0.05)])
+d1 <- meltSE(pb[,pb$celltype %in% cls], "Fkbp5", rowDat.columns = NA)
+d1$class <- "neuronal"
+
+resn <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.DEA.rds")
+pbn <- updateSEforPlots(readRDS("../scMultiome/GEX_analysis/nonNeuronal.broad.PB.rds"))
+pbn$celltype2 <- pbn$broadClass
+pbn <- log2FC(pbn, "logcpm", pbn$Treatment=="Handling +ARS" & pbn$TimePoint=="Control", by=pbn$celltype2)
+cls <- as.character(resn$cluster_id[which(resn$gene=="Fkbp5" & resn$ihw<0.01)])
+d2 <- meltSE(pbn[,pbn$celltype2 %in% cls], "Fkbp5", rowDat.columns = NA)
+d2$class <- "non-neuronal"
+i <- intersect(colnames(d1), colnames(d2))
+d <- rbind(d1[,i], d2[,i])
+d$cluster_id <- d$celltype2
+d$celltype2 <- factor(d$celltype2, unique(d$celltype2[order(d$class, d$celltype2)]))
+
+resa <- rbind(res[grep("Any",res$Comparison),],resn[grep("Any",resn$Comparison),])
+resa$feature <- resa$gene
+m <- merge(d[!duplicated(d[,c("cluster_id","feature")]),], resa[resa$Comparison=="stressAny",])
+m$lab <- paste0("ARS q=", format(m$ihw, digit=1),"\n",
+                "CRS q=", format(merge(m[,1:2], resa[resa$Comparison=="treatAny",])$ihw, digit=1))
+
 f1 <- ggplot(d, aes(TimePoint, scaledLFC)) + 
   stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment))  +
   geom_boxplot(aes(fill=Treatment)) + facet_wrap(~celltype2, nrow=2) + theme_bw() + labs(y="Fkbp5 scaled log2(FC)") +
   geom_text(data=m, y=2.7, x=0.5, aes(label=lab), size=3, colour="black", hjust=0, vjust=1) +
   scale_color_manual(values=cols) + scale_fill_manual(values=cols) + scale_x_discrete() +
-  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5), legend.position = c(1, 0), legend.justification = c(1, 0))
 f1
 ```
+
+
 
 ```{r}
 cls <- as.character(res$cluster_id[which(res$gene=="Egr1" & res$ihw<0.05)])
@@ -165,6 +210,7 @@ egr1 <- ggplot(d, aes(TimePoint, logcpm)) +
 
 # Correlation between GR expression and change in activity
 
+
 ```{r}
 pbn <- readRDS("../scMultiome/GEX_analysis/nonNeuronal.broad.PB.rds")
 d1 <- meltSE(pb, "Nr3c1", rowDat.columns = NA)
@@ -173,7 +219,6 @@ ag <- aggregate(rbind(d1[,c("logcpm","ncells")], d2[,c("logcpm","ncells")]), by=
 
 load("../scMultiome/ATAC/motifAcc.RData")
 
-se <- readRDS("../scMultiome/ATAC/celltype_cvDevs_neuronal.rds")
 dd <- meltSE(se1, "GCR", rowDat.columns = NA)
 dd <- dd[dd$TimePoint=="45min",]
 ag2 <- aggregate(dd[,c("centered","log2FC","scaledLFC")], by=list(celltype=gsub("/","\n",dd$cluster_id)), FUN=median)
@@ -193,15 +238,15 @@ grcor <- ggplot(m, aes(logcpm, log2FC)) + geom_smooth(method=MASS::rlm, alpha=0.
 
 
 
-```{r, fig.width=11, fig.height=16}
-pdf("Supp_final.pdf", width=11, height=16)
+
+```{r, fig.width=11, fig.height=14}
+pdf("Supp_final.pdf", width=11, height=14)
 plot_grid(
   plot_grid(btfp + ggtitle("ChIP-based inferred CREB activity"), labels="A", scale=0.95),
   plot_grid(p1, p2, p3a, labels=LETTERS[2:4], scale=0.95, nrow=1),
   plot_grid(egr1 + theme(legend.position = "bottom"), labels="E", scale=0.95),
-  plot_grid(f1, labels="F", scale=0.95),
-  plot_grid(grcor, NA, labels="G", scale=0.95),
-  nrow=5, rel_heights = c(1.3,2,1.5,2.1,1.3)
+  plot_grid(f1, grcor, labels=c("F","G"), scale=0.95, rel_widths = c(4,3)),
+  nrow=4, rel_heights = c(1.3,2,1.5,2)
 )
 dev.off()
 ```
