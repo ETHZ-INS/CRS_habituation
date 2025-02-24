@@ -1,0 +1,239 @@
+---
+title: "RNA QC and neuron split"
+output: html_document
+date: "2024-05-28"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(DropletUtils)
+  library(SingleCellExperiment)
+  library(scuttle)
+  library(scran)
+  library(scDblFinder)
+  library(BiocParallel)
+  library(BiocNeighbors)
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(edgeR)
+  library(Matrix)
+  library(CellMixS)
+  library(Seurat)
+})
+theme_set(theme_bw())
+```
+
+```{r}
+m <- read.delim("../CRS8_metadata.csv",header=TRUE,sep=";")
+m$TimePoint <- factor(gsub(" ","",m$Group), c("Control","15min","45min","3h"))
+row.names(m) <- paste0("sample_",m$TestNo)
+m$newName <- paste0(m$Treatment,"_",m$TimePoint,"_S",m$TestNo)
+```
+
+
+```{r}
+samples <- list.files("../cellranger", pattern = "cellbender_filtered_filtered\\.h5$", full=TRUE, recursive = TRUE)
+names(samples) <- gsub("_trimmed.+$","",basename(dirname(dirname(samples))))
+
+sce.list <- lapply(names(samples), FUN=function(s){
+  x <- read10xCounts(samples[s], type="HDF5", col.names=TRUE)
+  colnames(x) <- paste0(gsub("_.+$",".",gsub("sample_","S",colData(x)$Sample[1])), gsub("-",".",colnames(x)))
+  x <- x[rowData(x)$Type=="Gene Expression",]
+  g <- rowData(x)$Symbol
+  rowData(x) <- NULL
+  x$Sample <- rep(factor(s, names(samples)), ncol(x))
+  x2 <- as.sparse(sumCountsAcrossFeatures(x, g))
+  SingleCellExperiment(list(counts=x2), colData=colData(x))
+})
+
+e1 <- do.call(cbind, sce.list[1:8])
+e2 <- do.call(cbind, sce.list[9:16])
+e3 <- do.call(cbind, sce.list[17:24])
+sce <- cbind(e1,e2,e3)
+rm(e1,e2,e3,sce.list)
+gc()
+
+m <- m[levels(sce$Sample),]
+levels(sce$Sample) <- m$newName
+sce$Treatment <- m[as.integer(sce$Sample),"Treatment"]
+sce$TimePoint <- m[as.integer(sce$Sample),"TimePoint"]
+sce$GEM_batch <- m[as.integer(sce$Sample),"GEM_batch"]
+sce$Library_batch <- m[as.integer(sce$Sample),"Library_batch"]
+
+colnames(sce) <- paste0(gsub(".+_","",sce$Sample),".",sce$Barcode)
+saveRDS(sce, file="RNA.raw.SCE.rds")
+```
+
+
+```{r}
+# get mitochondrial genes:
+mito <- grep("mt-", rownames(sce), value = TRUE)
+# get QC metrics:
+sce <- addPerCellQC(sce, subsets=list(Mt=mito), percent.top=c(5,10))
+sce <- addPerFeatureQC(sce)
+```
+
+Add contamination proportion:
+
+```{r}
+lf <- list.files("../cellranger", pattern="per_barcode_metrics", recursive=TRUE, full=TRUE)
+names(lf) <- paste0("S",gsub("_trimmed49_imp_rev|sample_","",basename(dirname(dirname(lf)))))
+d <- dplyr::bind_rows(lapply(lf, FUN=function(x) read.delim(x, row.names=1, sep=",")), .id="Sample")
+row.names(d) <- paste0(d$Sample,".",d$gex_barcode)
+sce$unfiltered.sum <- d[colnames(sce),"gex_umis_count"]
+sce$contamination <- (sce$unfiltered.sum-sce$sum)/sce$unfiltered.sum
+sce$log10sum <- log10(sce$sum)
+```
+
+```{r}
+# we plot some of the metrics
+qc <- as.data.frame(colData(sce))
+ggplot(qc, aes(subsets_Mt_percent)) + geom_histogram() + facet_wrap(~Sample) + theme_bw()
+ggsave("figures/prop.Mt.png")
+ggplot(qc, aes(log10(sum), log10(detected))) + ggrastr::geom_point_rast() + geom_density2d()  + facet_wrap(~Sample)
+ggsave("figures/sums.png")
+ggplot(as.data.frame(colData(sce)), aes(contamination)) + geom_histogram() + facet_wrap(~Sample) + theme_bw() + scale_y_sqrt()
+ggsave("figures/contamination.png")
+```
+
+Add proportion unspliced from alevin
+
+```{r}
+aa <- readRDS("../alevin/propUnspliced.rds")
+row.names(aa) <- paste0(aa$Sample,".",aa$barcode)
+sce$propUnspliced <- aa[gsub("-[0-9]$","",colnames(sce)),"prop.unsp"]
+
+LSD::heatscatter(sce$contamination, sce$propUnspliced)
+```
+
+Add amulet doublet scores (from ATAC)
+
+```{r}
+lf <-list.files("../cellranger/", "atac_amulet_results", recursive=TRUE, full=TRUE)
+names(lf) <- sapply(strsplit(lf,"/"), FUN=function(x) gsub("sample_","S",gsub("_trimmed49_imp_rev","",x[[4]])))
+am <- dplyr::bind_rows(lapply(lf, FUN=function(x){
+  x <- readRDS(x)
+  x$Barcode <- row.names(x)
+  row.names(x) <- NULL
+  x
+}), .id="Sample")
+row.names(am) <- paste(am$Sample,am$Barcode,sep=".")
+saveRDS(am, "../cellranger/amulet.scores.rds")
+
+sce$amulet.qval <- am[colnames(sce),"q.value"]
+```
+
+```{r}
+round(cbind("libsize<300"=rowsum(as.integer(sce$sum<300), sce$Sample)[,1],
+            "libsize<500"=rowsum(as.integer(sce$sum<500), sce$Sample)[,1],
+            "libsize<1000"=rowsum(as.integer(sce$sum<1000), sce$Sample)[,1])/as.numeric(table(sce$Sample)),4)
+```
+
+```{r}
+sce <- sce[,which(sce$sum>=500 & sce$contamination<=0.6 & 
+                    sce$propUnspliced>0.15 & sce$percent.top_10<=50)]
+```
+
+
+Given the large imbalance between cell types, we'll manually include known markers in the list of genes to work with:
+
+```{r}
+genes <- list(
+  astrocytes = c("Aqp4", "Gfap", "Fgfr3","Dio2","S100b","Acsbg1"),
+  smooth_muscle = c("Tagln", "Cnn1", "Acta2", "Myl9", "Myh11"),
+  pericytes = c("Aspn", "Notch3", "Ndufa4l2", "Pdgfrb", "Higd1b"),
+  endothelial = c("Cdh5","Flt1","Pecam1","Flt4","Vwf"),
+  microglia = c("C1qb","Tyrobp","P2ry12", "Csf1r", "Irf8"),
+  neuronal = c("Snap25", "Stmn2", "Syn1", "Rbfox3", "Dlg4", "Gabbr2","Grin2b","Grin1"),
+  neuronal_excitatory = c("Slc17a7","Slc17a6","Slc17a8","Camk2a","Meis2","Neurod6","Nrn1"),
+  neuronal_inhibitory = c("Gad1","Gad2","Lhx6","Adarb2","Slc6a1","Pvalb","Sst","Sema3c"),
+  neuronal_dopaminergic = c("Smad3", "Slc18a2"),
+  neuronal_glycinergic = c("Slc6a9","Slc32a1"),
+  neuronal_adrenergic = c("Ddc","Dbh","Syt1"),
+  neuronal_noradrenergic = c("Slc38a11", "Slc9b2"),
+  neuronal_serotonergic = c("Slc22a3"),
+  NSC=c("Eomes", "Hopx", "Pou3f4"),
+  oligodendrocyte = c("Opalin","Plp1","Mag","Mog","Klk6","Mbp","Nipal4"),
+  #immune = c("Pxk", "Cd19", "Cd68", "Fcgr1", "Trbc2", "Cd3d"),
+  OPC = c("Pdgfra","Sox6","Bcan","Neu4", "Fyn", "Tnr")
+)
+```
+
+```{r}
+# get rid of seldom detected genes except if they're markers
+sce <- sce[rowSums(counts(sce))>0 & 
+             (rowSums(counts(sce))>=10 | row.names(sce) %in% unlist(genes)),]
+sce <- logNormCounts(sce)
+hvg <- getTopHVGs(sce, n=3000)
+hvg <- union(unlist(genes),hvg)
+```
+
+
+```{r}
+# we flag doublets:
+feats <- union(head(row.names(sce)[order(-rowSums(counts(sce)))],500),head(hvg,1000))
+set.seed(123)
+sce <- scDblFinder(sce, samples="Sample", nfeatures=feats)
+sce$scDblFinder.score1 <- sce$scDblFinder.score
+sce$scDblFinder.class1 <- sce$scDblFinder.class
+set.seed(42)
+sce <- scDblFinder(sce, samples="Sample", nfeatures=feats)
+sce$scDblFinder.meanScore <- (sce$scDblFinder.score+sce$scDblFinder.score1)/2
+
+isDbl <- (sce$scDblFinder.class=="doublet" & sce$scDblFinder.class1=="doublet") |
+  (sce$scDblFinder.meanScore>0.2 & sce$amulet.qval<0.01)
+sce <- sce[,!isDbl]
+logcounts(sce) <- NULL
+saveRDS(sce, "sce.filtered.rds")
+```
+
+
+# Seurat
+
+```{r}
+sce <- readRDS("sce.filtered.rds")
+so <- CreateSeuratObject(counts = counts(sce), meta.data=as.data.frame(colData(sce)))
+so <- ScaleData(NormalizeData(so))
+so <- FindVariableFeatures(so, selection.method="disp")
+VariableFeatures(so) <- unique(c(unlist(genes),VariableFeatures(so)))
+so <- RunPCA(so, verbose = FALSE)
+so <- RunUMAP(so, dims = 1:20, verbose = FALSE)
+ggplot(cbind(as.data.frame(Embeddings(Reductions(so,slot = "umap"))), doubletScore=so$scDblFinder.meanScore),
+       aes(umap_1, umap_2, colour=doubletScore)) + ggrastr::geom_point_rast()
+so <- FindNeighbors(so, dims = 1:20, verbose = FALSE)
+so <- FindClusters(so, resolution=1.2, verbose = FALSE)
+```
+
+```{r, fig.width=12, fig.height=7}
+pb <- sumCountsAcrossCells(sce[,colnames(so)], so$seurat_clusters)
+assays(pb)$CPM <- cpm(calcNormFactors(DGEList(assay(pb))))
+assays(pb)$propOfMax <- assays(pb)$CPM/rowMax(assays(pb)$CPM)
+assays(pb)$logcpm <- log1p(assays(pb)$CPM)
+
+nG <- intersect(row.names(so),unlist(genes[grep("neuronal",names(genes))]))
+oG <- intersect(row.names(so),unlist(genes[grep("neuronal|NSC",names(genes),invert=TRUE)]))
+relScore <- colMeans(assay(pb, "propOfMax")[nG,])/colMeans(assay(pb[oG,],"propOfMax"))
+pb$relScore <- log2(relScore)
+pb$class <- ifelse(pb$relScore>1,"neuronal","nonNeuronal")
+
+pdf("figures/split_pb_markers.pdf", width = 10, height=8)
+sechm(pb[,order(pb$relScore)], genes, assayName = "propOfMax", do.scale=FALSE, hmcols=viridis::viridis(100), 
+        row_names_gp=gpar(fontsize=7), row_title_rot=0, show_colnames = TRUE,
+      top_annotation=c("ncells"), gaps_at="class", show_rownames = TRUE)
+dev.off()
+
+notNeuron <- colnames(pb)[which(relScore<1)]
+sce1 <- sce[,colnames(so)[so$seurat_clusters %in% notNeuron]]
+sce2 <- sce[,colnames(so)[!(so$seurat_clusters %in% notNeuron)]]
+sce1 <- SingleCellExperiment(list(counts=assay(sce1)), colData=colData(sce1))
+saveRDS(sce1, "sce.nonNeuronal.filtered.rds")
+sce2 <- SingleCellExperiment(list(counts=assay(sce2)), colData=colData(sce2))
+saveRDS(sce2, "sce.neurons.filtered.rds")
+```
+
+
+```{r}
+sessionInfo()
+```
+

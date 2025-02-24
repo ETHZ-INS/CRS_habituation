@@ -1,0 +1,273 @@
+---
+title: "RNA non-neuronal clustering and DEA"
+output: html_document
+date: "2024-05-28"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(edgeR)
+  library(scuttle)
+  library(Matrix)
+  library(Seurat)
+  library(harmony)
+  library(muscat)
+  library(BiocParallel)
+})
+theme_set(theme_bw())
+source("functions.R")
+```
+
+```{r}
+sce <- readRDS("sce.nonNeuronal.filtered.rds")
+sce <- sce[rowSums(counts(sce))>=10,]
+sce <- sce[,sce$Sample!="Handling_45min_S2"]
+sce$Sample <- droplevels(sce$Sample)
+```
+
+```{r}
+genes <- list(
+  neuronal = c("Snap25", "Stmn2", "Syn1", "Rbfox3", "Dlg4"),
+  astrocytes = c("Aqp4", "Gfap", "Fgfr3","Dio2","S100b","Acsbg1","Sox9","Ndrg2","Aldh1l1","Slc1a2","Slc1a3"),
+  smooth_muscle = c("Tagln", "Cnn1", "Acta2", "Myl9", "Myh11"),
+  pericytes = c("Aspn", "Notch3", "Ndufa4l2", "Pdgfrb", "Higd1b"),  
+  endothelial = c("Cdh5","Flt1","Pecam1","Flt4","Abcg2","Vwf","Slc2a1","Bsg"),
+  microglia = c("C1qb","Tyrobp","P2ry12", "Csf1r", "Irf8"),
+  oligodendrocyte = c("Opalin","Plp1","Mag","Mog","Klk6","Mbp","Nipal4"),
+  OPC = c("Pdgfra","Sox6","Bcan","Neu4", "Fyn", "Tnr"),
+  COP = c("Fyn","Ust","Opcml","Tnr","Pcdh7"),
+  mural = c("Slc6a20a","Vtn","Colec12", "Arhgap29", "Zic1"),
+  PVM = c("Mrc1","F13a1","Dab2","Lyz2"),
+  other_vascular = c("Bnc2","Mgp"),
+  CR = c("Reln","Cntnap2")
+)
+```
+
+# Seurat
+
+```{r}
+so <- CreateSeuratObject(counts = counts(sce), meta.data=as.data.frame(colData(sce)))
+so <- so[,so$subsets_Mt_percent<=1]
+so <- ScaleData(NormalizeData(so))
+so <- FindVariableFeatures(so, selection.method="disp")
+VariableFeatures(so) <- unique(c(unlist(genes[-1]),VariableFeatures(so)))
+so <- RunPCA(so, verbose = FALSE)
+gc(full=TRUE, verbose=FALSE)
+so <- RunHarmony(so, group.by.vars=c("Sample","GEM_batch"), ncores=4)
+
+# re-select variable features based on sketched data:
+subidx <- sketchR::geosketch(Embeddings(so,"harmony"), N=6000, seed=123)
+so2 <- so[,subidx]
+so2 <- ScaleData(so2)
+vf <- list(
+  VariableFeatures(FindVariableFeatures(so2, selection.method="disp")),
+  VariableFeatures(FindVariableFeatures(so2, selection.method="vst")),
+  row.names(so2)[head(order(-rowSums(GetAssayData(so2, layer="counts"))),1000)],
+  unlist(genes[-1])
+)
+rm(so2)
+VariableFeatures(so) <- unique(unlist(vf))
+
+so <- RunPCA(so, verbose = FALSE)
+gc(full=TRUE, verbose=FALSE)
+so <- RunHarmony(so, group.by.vars=c("Sample","GEM_batch"), ncores=4)
+so <- FindNeighbors(so, dims = 1:20, reduction="harmony", verbose = FALSE)
+so <- FindClusters(so, resolution = 1, verbose = FALSE)
+
+# remove clusters with >20% median doublet probability or >0.2% median Mt
+ctcq <- data.frame(row.names=levels(so$seurat_clusters),
+  medDblS=sapply(split(so$scDblFinder.meanScore, so$seurat_clusters),median),
+  medDblA=sapply(split(1-so$amulet.qval, so$seurat_clusters),median),
+  medMt=sapply(split(so$subsets_Mt_percent, so$seurat_clusters),median),
+  medUnsp=sapply(split(so$propUnspliced, so$seurat_clusters),median),
+  medCond=sapply(split(so$contamination, so$seurat_clusters),median),
+  n=as.numeric(table(so$seurat_clusters))
+)
+excluded_clusters <- row.names(ctcq)[which(
+  ctcq$medDblS>0.2 |
+  ctcq$medMt>0.1 |
+  ctcq$medUnsp<0.35
+)]
+so <- so[,which(!(so$seurat_clusters %in% excluded_clusters))]
+
+# re-do clustering after exclusion
+so <- FindNeighbors(so, dims = 1:30, reduction="harmony", verbose = FALSE, k.param=40)
+so <- FindClusters(so, resolution = 3, verbose = FALSE)
+
+so <- RunUMAP(so, dims = 1:30, verbose = FALSE, reduction="harmony", min.dist=0.1,
+              spread=2, metric="correlation", n.neighbors=40)
+
+UMAPPlot(so, label=TRUE)
+```
+
+```{r}
+pb <- sumCountsAcrossCells(sce[,colnames(so)], so$seurat_clusters)
+assays(pb)$CPM <- cpm(calcNormFactors(DGEList(assay(pb))))
+assays(pb)$propOfMax <- assays(pb)$CPM/rowMax(assays(pb)$CPM)
+genes$cycling=c("Top2a","Ccnb2","Cdk1","Ccnf")
+m <- sapply(genes[!(names(genes) %in% c("neuronal","NSC","mural","cycling"))], FUN=function(x) colMeans(assay(pb,"propOfMax")[x,]))
+c2t <- setNames(colnames(m)[apply(m,1,FUN=function(x){
+  w <- which.max(x);
+  if(x[w]>(1.25*max(x[-w]))) return(w)
+  return(NA)
+})], row.names(m))
+
+so$quicklabel <- so$seurat_clusters
+levels(so$quicklabel) <- c2t
+c2t <- data.frame(row.names=names(c2t), celltype=c2t, unsure=is.na(c2t))
+Idents(so) <- paste(so$quicklabel,so$seurat_clusters,sep=".")
+
+UMAPPlot(so, label=TRUE)
+```
+
+
+```{r, fig.width=12, fig.height=7}
+# heatmap for the known markers:
+colnames(pb) <- paste(c2t$celltype,row.names(c2t),sep=".")
+assays(pb)$logcpm <- log1p(assays(pb)$CPM)
+sechm(pb, genes, assayName = "propOfMax", do.scale=FALSE, hmcols=viridis::viridis(100), 
+        row_names_gp=gpar(fontsize=7), row_title_rot=0, show_colnames = TRUE,
+      top_annotation=c("ncells","pc.mt"), show_rownames = TRUE)
+```
+
+
+```{r}
+so2 <- so[,!grepl("microglia|oligo|OPC|COP|astro|CR",so$quicklabel)]
+Idents(so2) <- droplevels(Idents(so2))
+novelMarkers <- FindAllMarkers(so2, logfc.threshold=1, min.pct=0.1, only.pos=TRUE, method="poisson")
+nm <- lapply(split(novelMarkers$gene, novelMarkers$cluster),head,n=10)
+rm(so2)
+
+c2t$celltype[grepl("OPC",c2t$celltype) & colMeans(assay(pb,"propOfMax")[genes$cycling,])>0.8] <- "OPC.cycling"
+c2t[gsub("NA\\.","",names(which(lengths(lapply(nm, intersect, y=c("Gpc5","Sox6")))>1))),"celltype"] <- "other_glia"
+
+so$celltype <- so$seurat_clusters
+levels(so$celltype) <- c2t$celltype
+
+(UMAPPlot(so, group.by="seurat_clusters", label=TRUE) + UMAPPlot(so, group.by="celltype", label=TRUE))
+```
+
+```{r}
+Idents(so) <- so$celltype
+saveRDS(so, "nonNeuronal.SO.rds")
+```
+
+```{r}
+sce <- sce[,colnames(so)]
+pb <- sumCountsAcrossCells(sce,
+                           DataFrame(so@meta.data[,c("Sample","Treatment","TimePoint","GEM_batch","celltype")]))
+colnames(pb) <- paste0(pb$celltype,".",pb$Sample)
+assays(pb)$CPM <- cpm(calcNormFactors(DGEList(assay(pb))))
+assays(pb)$propOfMax <- assays(pb)$CPM/rowMax(assays(pb)$CPM)
+assays(pb)$logcpm <- log1p(assays(pb)$CPM)
+pb <- pb[,order(pb$celltype, pb$TimePoint, pb$Treatment)]
+
+saveRDS(pb, "nonNeuronal.celltype.PB.rds")
+
+sechm(pb, genes, assayName = "propOfMax", do.scale=FALSE, hmcols=viridis::viridis(100), 
+        row_names_gp=gpar(fontsize=7), row_title_rot=0, gaps_at="celltype",
+      top_annotation=c("ncells","TimePoint"), show_rownames = TRUE)
+```
+
+```{r}
+sce$broadClass <- sce$celltype <- so$celltype
+sce$seurat_cluster <- so$seurat_clusters
+
+names(broadClass) <- broadClass <- levels(sce$celltype)
+conv <- list(OPC="OPC|COP", vascular="mural|smooth_muscle|endothelial|pericytes|vascular|other_vascular",
+             astrocytes="astrocytes")
+for(f in names(conv)) broadClass <- gsub(conv[[f]], f, broadClass)
+levels(sce$broadClass) <- broadClass
+
+pb <- sumCountsAcrossCells(sce, colData(sce)[,c("Sample","Treatment","TimePoint","GEM_batch","broadClass")])
+colnames(pb) <- paste0(pb$broadClass,".",pb$Sample)
+assays(pb)$CPM <- cpm(calcNormFactors(DGEList(assay(pb))))
+assays(pb)$propOfMax <- assays(pb)$CPM/rowMax(assays(pb)$CPM)
+assays(pb)$logcpm <- log1p(assays(pb)$CPM)
+pb <- pb[,order(pb$broadClass, pb$TimePoint, pb$Treatment)]
+
+pb <- log2FC(pb, "logcpm", controls = pb$TimePoint=="Control" & pb$Treatment=="Handling", by=pb$broadClass)
+metadata(pb)$anno_colors <- list(Treatment=c(Handling="lightgrey", Restraint="darkblue"),
+                                 TimePoint=setNames(RColorBrewer::brewer.pal(4,"Reds"), levels(pb$TimePoint)))
+
+saveRDS(pb, "nonNeuronal.broad.PB.rds")
+```
+
+
+```{r}
+reducedDim(sce, "UMAP") <- Embeddings(so, "umap")
+saveRDS(sce, file="nonNeuronal.SCE.rds")
+rm(so)
+#sce <- readRDS("nonNeuronal.SCE.rds")
+```
+
+
+# Differential expression analysis
+
+```{r}
+sce <- prepSCE(sce, kid="broadClass", sid="Sample", gid="TimePoint")
+pb2 <- aggregateData(sce)
+
+mm <- model.matrix(~Treatment*group_id, data=as.data.frame(colData(pb2)))
+coefs <- c(list(stressAny=grep("group_id",colnames(mm)),
+                        treatAny=grep("Treatment",colnames(mm))),
+           lapply(setNames(seq_len(ncol(mm))[-1],colnames(mm)[-1]), FUN=identity))
+res <- pbDS(pb2, design=mm, BPPARAM=BiocParallel::MulticoreParam(10), min_cells=20,
+            coef=coefs)
+
+pb <- pb[,pb$broadClass %in% names(res$table[[1]])]
+pb$broadClass <- droplevels(pb$broadClass)
+
+names(res$table) <- gsub("group_id","ARS",names(res$table))
+names(res$table) <- gsub("Treatment","",names(res$table))
+names(res$table)[1:2] <- c("stressAny","treatmentAny")
+ndegs <- sapply(res$table, FUN=function(x){
+  sapply(x, FUN=function(y){
+    sum(y$p_adj.glb<0.15 | y$p_adj.loc<0.15,na.rm=TRUE)
+  })
+})
+ndegs
+
+# bulk FDR as covariate
+ud <- readRDS("../../../work/plger/CRS/output/all.unspliced.SE.rds")
+fd <- readRDS("../../../work/plger/CRS/output/all.full.SE.rds")
+bulkfdr <- setNames(rowMins(cbind(rowData(fd)$FDR,rowData(ud)$FDR),na.rm=TRUE),row.names(ud))
+bulkfdr[is.infinite(bulkfdr) | is.na(bulkfdr)] <- 2
+
+res <- applyIHWonMuscatRes(res=res, pb=pb, bulkfdr = bulkfdr)
+pb <- res$pb
+res <- res$res
+
+res2 <- dplyr::bind_rows(lapply(res$table, FUN=dplyr::bind_rows), .id="Comparison")
+for(f in c("Comparison","cluster_id")) res2[[f]] <- factor(res2[[f]])
+res2$coef <- NULL
+saveRDS(res2, "nonNeuronal.DEA.rds")
+
+metadata(pb)$default_view <- list(top_annotation=c("TimePoint","Treatment"))
+saveRDS(pb, "nonNeuronal.pb.rds")
+```
+
+
+```{r, fig.width=10, fig.height=8}
+res3 <- res2[!grepl("Any|Restraint",res2$Comparison),]
+res3$significant <- res3$ihw<0.1 & abs(res3$logFC)>log2(2)
+res4 <- res3[which(res3$significant),]
+res4 <- dplyr::bind_rows(lapply(split(res4,paste0(res4$Comparison,res4$cluster_id)), FUN=\(x){
+  x[head(order(x$ihw),10),]
+}))
+ggplot(res3, aes(logFC, -log10(ihw), colour=significant, label=gene)) +
+  ggrastr::geom_point_rast() + 
+  ggrepel::geom_text_repel(data=res4, colour="black", min.segment.length = 0) +
+  facet_grid(Comparison~cluster_id) + theme_bw()
+```
+
+
+
+```{r}
+sessionInfo()
+```
+

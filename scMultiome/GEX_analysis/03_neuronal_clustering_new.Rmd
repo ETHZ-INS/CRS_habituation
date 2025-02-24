@@ -1,0 +1,363 @@
+---
+title: "RNA neuronal annotation"
+output: html_document
+date: "2024-06-28"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(edgeR)
+  library(scuttle)
+  library(Matrix)
+  library(Seurat)
+  library(harmony)
+  library(muscat)
+  library(SingleR)
+  library(future)
+})
+theme_set(theme_bw())
+source("functions.R")
+```
+
+```{r}
+sce <- readRDS("sce.neurons.filtered.rds")
+sce <- sce[rowSums(counts(sce))>=10,]
+sce <- sce[,sce$Sample!="Handling_45min_S2"]
+sce$Sample <- droplevels(sce$Sample)
+```
+
+# Flag genes enriched in empty droplets
+
+```{r}
+soup <- readRDS("../cellranger/soups.rds")
+pb <- sumCountsAcrossCells(sce, sce$Sample)
+soup <- soup[row.names(pb),]
+dds <- calcNormFactors(DGEList(cbind(soup,assay(pb)),
+                               group=rep(LETTERS[2:1], times=c(ncol(soup),ncol(pb)))))
+dds <- estimateDisp(dds)
+inSoup <- as.data.frame(topTags(exactTest(dds),Inf))
+saveRDS(inSoup, "neurons.vs.soup.DEA.rds")
+inSoup <- row.names(inSoup)[which(inSoup$FDR<0.01 & inSoup$logFC>log2(1.2))]
+```
+
+
+
+```{r}
+genes <- list(
+  neuronal = c("Snap25", "Stmn2", "Syn1", "Rbfox3", "Dlg4", "Gabbr2","Grin2b","Grin1"),
+  glial = c("Aqp4", "Fgfr3", "Tyrobp", "Opalin", "Pdgfra", "Gfap"),
+  neuronal_excitatory = c("Slc17a7","Slc17a6","Slc17a8","Camk2a","Meis2","Neurod6","Nrn1"),
+  neuronal_inhibitory = c("Gad1","Gad2","Lhx6","Adarb2","Slc6a1","Pvalb","Sst","Sema3c","Slc32a1"),
+  neuroblast=c("Eomes", "Hopx", "Pou3f4","Ascl1", "Fabp7", "Nes", "Mki67"),
+  cycling=c("Top2a","Cdc25c"),
+  others=c("Lamp5","Vip","Oxt","Oxtr","Chodl","Pax6","Sncg","Vipr2","Ntng1","Pax6","Nxph1","Ptprm","Reln")
+)
+
+receptors <- lapply(
+  list(Serotonin="Htr1f|Htr4|Htr7|Htr2a|Htr1a|Htr2c|Htr3a",
+        Glutamate="Grm5|Grm7|Grm1|Grm8|Grm3|Grm2",
+        GABA="Gabra1|Gabra5|Gabrb2|Gabrg3|Gabrg2|Gabra4|Gabrb3|Gabrb1|Gabra3|Gabra2|Gabrg1",
+        Dopamine="Drd1|Drd2|Drd4|Drd5",
+        AMPA="Gria",
+        Kainate="Grik",
+        NMDA="Grin2a|Grin2b|Grin1|Grin3a|Grina|Grin2d",
+        "(Nor)adrenaline"="Adra1b|Adra1a|Adra1d|Adra2c|Adrb1"), FUN=function(x){
+          grep(x, row.names(sce), value=TRUE)
+        })
+```
+
+
+# Seurat
+
+```{r}
+so <- CreateSeuratObject(counts = counts(sce), meta.data=as.data.frame(colData(sce)))
+so <- so[,so$subsets_Mt_percent<=1 & so$propUnspliced>0.2]
+so <- ScaleData(NormalizeData(so))
+so <- FindVariableFeatures(so, selection.method="disp", nfeatures=3500)
+VariableFeatures(so) <- unique(c(unlist(genes),unlist(receptors),
+                                 VariableFeatures(so)))
+args <- strsplit("Gadd45g, Egr4, Arc, Fosb, Npas4, Btg2, Fos, Junb, Jun, Egr1, Dusp5, Egr3, Nr4a1, Nr4a2, Nr4a3, Per1, Scg2, Bdnf, Tiparp, Dusp1, Dusp5",", ")[[1]]
+VariableFeatures(so) <- setdiff(VariableFeatures(so), args)
+so <- so[VariableFeatures(so),]
+so <- RunPCA(so, verbose = FALSE)
+so$GEM_batch <- as.factor(so$GEM_batch)
+so$Library_batch <- as.factor(so$Library_batch)
+gc(full=TRUE)
+set.seed(42)
+# re-run harmony if getting a "Quick-TRANSfer" warning
+so <- RunHarmony(so, group.by.vars=c("Sample","GEM_batch","Library_batch"),
+                 theta=c(2,5,5), sigma=0.2, ncores=4, 
+                 kmeans_init_nstart=40, kmeans_init_iter_max=200)
+so <- RunUMAP(so, dims = 1:30, verbose = FALSE, reduction="harmony", min.dist=0.1,
+             spread=3, metric="correlation", n.neighbors=100)
+so <- FindNeighbors(so, dims = 1:30, reduction="harmony", verbose = FALSE, k.param = 50)
+so <- FindClusters(so, resolution = 1.3, verbose = FALSE)
+UMAPPlot(so, label=TRUE)
+tt <- table(so$Sample, so$seurat_clusters)
+tt <- unclass(tt)/rowSums(unclass(tt))
+Heatmap(sqrt(tt))
+
+clqc <- data.frame(
+  pDblA=sapply(split(so$amulet.qval, so$seurat_clusters),FUN=\(x) sum(x<0.05)/length(x)),
+  medDblS=sapply(split(so$scDblFinder.meanScore, so$seurat_clusters),median),
+  medMt=sapply(split(so$subsets_Mt_percent, so$seurat_clusters),median),
+  medUnsp=sapply(split(so$propUnspliced, so$seurat_clusters),median),
+  medCont=sapply(split(so$contamination, so$seurat_clusters),median),
+  medLS=sapply(split(so$log10sum, so$seurat_clusters),median)
+)
+```
+
+
+```{r, fig.width=12, fig.height=7}
+pb <- sumCountsAcrossCells(sce[,colnames(so)], so$seurat_clusters)
+assays(pb)$CPM <- edgeR::cpm(calcNormFactors(DGEList(assay(pb))))
+assays(pb)$propOfMax <- assays(pb)$CPM/rowMax(assays(pb)$CPM)
+assays(pb)$logcpm <- log1p(assays(pb)$CPM)
+
+# heatmap for the known markers:
+sechm(pb, genes, assayName = "propOfMax", do.scale=FALSE, hmcols=viridis::viridis(100), 
+        row_names_gp=gpar(fontsize=7), row_title_rot=0, show_colnames = TRUE,
+      top_annotation=c("ncells","pc.mt"), show_rownames = TRUE)
+```
+
+```{r}
+mm <- FindAllMarkers(so, min.pct=0.1, logfc.threshold=1)
+saveRDS(mm, "neuronal.clusterMarkers.rds")
+mm2 <- lapply(split(mm,mm$cluster), FUN=function(x) head(x$gene[x$p_val_adj<0.05 & x$avg_log2FC>1],10))
+posMp <- t(sapply(split(mm,mm$cluster), FUN=function(x){
+  x <- x[x$p_val_adj<0.05 & abs(x$avg_log2FC)>1,]
+  c(nb=sum(x$avg_log2FC>0), prop=sum(x$avg_log2FC>0)/nrow(x))
+}))
+```
+
+
+```{r}
+ref <- readRDS("/mnt/germain/datasets/Allen_10XSMARTSEQTAXONOMY_clusterTmeans.SE.rds")
+ref <- ref[,!grepl("^L[0-9]|CTX|Endo",ref$celltype)]
+ref$celltype <- gsub(" HPF","",ref$celltype)
+dds <- calcNormFactors(DGEList(assay(ref)))
+assays(ref)$logcounts <- log1p(edgeR::cpm(dds))
+assays(ref)$propOfMax <- edgeR::cpm(dds)/rowMax(edgeR::cpm(dds))
+pred <- SingleR(test=pb, ref=ref, assay.type.test="logcpm", assay.type.ref="logcounts",
+                labels = ref$celltype)
+m <- sapply(genes[-length(genes)], FUN=function(x) Matrix::colMeans(assay(pb,"propOfMax")[x,,drop=FALSE]))
+pred$class <- ifelse(log2(m[,"neuronal_excitatory"]/m[,"neuronal_inhibitory"])>0,
+                             "excitatory","inhibitory")
+pred[which(m[,"glial"]>m[,"neuronal"]), "class"] <- "nonNeuronal"
+
+pred$pred.next <- apply(pred$scores, 1, FUN=function(x){
+  colnames(pred$scores)[order(-x)[2]]
+})
+pred$pred.score <- apply(pred$scores, 1, FUN=max)
+pred$medDblS <- clqc$medDblS
+pred$pDblA <- clqc$pDblA
+pred$n <- as.integer(table(so$seurat_clusters))
+pred$markers <- CharacterList(mm2)
+pred$markers2 <- paste(pred$markers, collapse=", ")
+```
+
+Add dorsal/ventral scoring:
+
+```{r}
+# signatures from https://elifesciences.org/articles/14997 :
+ventral = c("Cadm1","Cpne7","Crym","Efnb2","Etv1","Rab26","Resp18","Timp2","Wdr6")
+dorsal = c("Cadm2","Dagla","Epha5","Epha7","Rimbp2","Sertad4")
+
+so$dorsal <- (1000*colSums(GetAssayData(so, layer="counts")[intersect(row.names(so),dorsal),])/so$sum)
+so$ventral <- (1000*colSums(GetAssayData(so, layer="counts")[intersect(row.names(so),ventral),])/so$sum)
+
+CAclusters <- row.names(pred)[grep("CA",pred$pruned.labels)]
+
+so$vd <- pmin(so$ventral/quantile(so$ventral[so$seurat_clusters %in% CAclusters],0.9),1)-
+pmin(so$dorsal/quantile(so$dorsal[so$seurat_clusters %in% CAclusters],0.9),1)
+
+pred$vd <- sapply(split(so$vd,so$seurat_clusters), median)[row.names(pred)]
+```
+
+```{r}
+pred$badMarkers <- sum(pred$markers %in% inSoup)
+pred$propPosMarkers <- posMp[,2]
+pred$nbPosMarkers <- posMp[,1]
+
+# eliminate dubious clusters:
+excluded_clusters <- row.names(clqc)[which(
+  clqc$medUnsp<0.5 |
+  clqc$medDblS>0.3 | # or 0.5?
+  clqc$medMt>0.02 |
+  clqc$pDblA>0.2 |
+  clqc$medCont>0.3 |
+  pred$class=="nonNeuronal" |
+  pred$badMarkers>lengths(pred$markers)/2 |
+  pred$propPosMarkers<0.1
+)]
+pred$excluded <- row.names(pred) %in% excluded_clusters
+saveRDS(pred, "neurons_allen_cluster_predictions_prefilter.rds")
+
+excluded_clusters <- row.names(pred)[pred$excluded]
+
+so <- so[,which(!(so$seurat_clusters %in% excluded_clusters))]
+```
+
+Repeat clustering after exclusion of dubious clusters:
+
+```{r, fig.width=14, fig.height=6}
+so <- RunUMAP(so, dims = 1:30, verbose = FALSE, reduction="harmony", min.dist=0.1,
+             spread=3, metric="correlation", n.neighbors=100)
+so <- FindNeighbors(so, dims = 1:30, reduction="harmony", verbose = FALSE, k.param = 50)
+so <- FindClusters(so, resolution = 1.3, verbose = FALSE)
+UMAPPlot(so, label=TRUE) + theme(legend.position = "none") | FeaturePlot(so, "vd") + scale_colour_gradient2(low = "darkred", mid="grey", high = "darkblue", breaks=c(-1,1),labels=c("dorsal","ventral"))
+```
+
+```{r}
+pb <- sumCountsAcrossCells(sce[,colnames(so)], so$seurat_clusters)
+assays(pb)$CPM <- edgeR::cpm(calcNormFactors(DGEList(assay(pb))))
+assays(pb)$propOfMax <- assays(pb)$CPM/rowMax(assays(pb)$CPM)
+assays(pb)$logcpm <- log1p(assays(pb)$CPM)
+
+mm <- FindAllMarkers(so, min.pct=0.1, logfc.threshold=1)
+saveRDS(mm, "neuronal.clusterMarkers.rds")
+mm2 <- lapply(split(mm,mm$cluster), FUN=function(x) head(x$gene[x$p_val_adj<0.05 & x$avg_log2FC>1],10))
+```
+
+
+```{r}
+pred <- SingleR(test=pb, ref=ref, assay.type.test="logcpm", assay.type.ref="logcounts",
+                labels = ref$celltype)
+m <- sapply(genes[-length(genes)], FUN=function(x) Matrix::colMeans(assay(pb,"propOfMax")[x,,drop=FALSE]))
+pred$class <- ifelse(log2(m[,"neuronal_excitatory"]/m[,"neuronal_inhibitory"])>0,
+                             "excitatory","inhibitory")
+
+pred$pred.next <- apply(pred$scores, 1, FUN=function(x){
+  colnames(pred$scores)[order(-x)[2]]
+})
+pred$pred.score <- apply(pred$scores, 1, FUN=max)
+pred$n <- as.integer(table(so$seurat_clusters))
+pred$markers <- CharacterList(mm2)
+pred$markers2 <- paste(pred$markers, collapse=", ")
+pred$vd <- sapply(split(so$vd,so$seurat_clusters), median)[row.names(pred)]
+
+# remove ventral/dorsal when inconsistent with signature
+pred$curated <- pred$labels
+w <- which(grepl("-ve",pred$curated) & pred$vd < 0.1)
+pred$curated[w] <- gsub("-ve","",pred$curated[w])
+w <- which(grepl("-do",pred$curated) & pred$vd > 0)
+pred$curated[w] <- gsub("-do","",pred$curated[w])
+# add ventral/dorsal to CA regions based on signature
+w <- which(grepl("CA|ProS",pred$curated) & pred$vd > 0.2)
+pred$curated[w] <- gsub("-ve-ve","-ve",paste0(pred$curated[w],"-ve"))
+w <- which(grepl("CA",pred$curated) & pred$vd < -0.2)
+pred$curated[w] <- gsub("-do-do","-do",paste0(pred$curated[w],"-do"))
+
+# name clusters from similar regions using markers
+pred$curated[which(grepl("SUB",pred$labels) & sum(pred$markers %in% c("Rai14","Ccn2"))==2)] <- "Ccn2"
+pred$curated[which(grepl("SUB",pred$labels) & sum(pred$markers %in% c("Rmst","Cntnap4"))==2)] <- "SUB/Cntnap4"
+pred$curated[which(grepl("SUB",pred$curated) & any(pred$markers=="Fn1"))] <- "SUB/Fn1"
+if(!any(grepl("CA1-do", pred$curated))) pred$curated[which(pred$curated=="CA1" & pred$vd < -0.1)] <- "CA1-do"
+pred$curated[which(pred$curated=="CA3")] <- "CA3-ve"
+pred$curated[which(grepl("IT HATA",pred$curated) & any(pred$markers=="Camk2d"))] <- "IT-HATA/Camk2d"
+pred$curated[which(grepl("IT",pred$curated) & any(pred$markers=="Tshz2"))] <- "IT/Tshz2"
+pred$curated[grepl("ProS-ve",pred$curated)] <- "CA1-ve-ProS"
+
+pred$curated[which(pred$curated=="SUB" & any(pred$markers=="Lipm"))] <- "SUB/Lipm"
+pred$curated <- gsub("Lamp5 Lhx6","Lamp5",pred$curated)
+pred$long <- as.factor(pred$class)
+levels(pred$long) <- gsub("excitatory","ExN",levels(pred$long))
+levels(pred$long) <- gsub("inhibitory","InhN",levels(pred$long))
+pred$long <- paste0(pred$long, ".", pred$curated)
+w <- which(pred$labels=="SUB" & pred$n<300)
+pred$curated <- pred$long[w] <- NA
+
+so$celltype <- so$seurat_clusters
+levels(so$celltype) <- pred$long
+so <- so[,!is.na(so$celltype)]
+so$celltype <- droplevels(so$celltype)
+so$celltype2 <- so$celltype
+levels(so$celltype2) <- gsub("/","\n",levels(so$celltype2))
+
+
+saveRDS(pred, file="neurons_allen_cluster_predictions.rds")
+
+tt <- table(so$Sample, so$celltype)
+tt <- unclass(tt)/rowSums(unclass(tt))
+Heatmap(sqrt(tt))
+```
+
+
+```{r, fig.width=13, fig.height=6}
+p <- UMAPPlot(so, group.by="celltype2", label=TRUE, raster.dpi=c(1024,1024)) + 
+  theme(legend.position = "none") + ggtitle("Cell type") | 
+  FeaturePlot(so, "vd", raster.dpi=c(1024,1024)) + ggtitle("ventral/dorsal") +
+  scale_colour_gradient2(low = "darkred", mid="grey", high = "darkblue", breaks=c(-1,1),labels=c("dorsal","ventral"))
+pdf("figures/neuronal_umap.pdf", width=13, height=6)
+p
+dev.off()
+
+```
+
+
+
+```{r}
+Idents(so) <- so$celltype
+mmt <- FindAllMarkers(so, min.pct=0.2, logfc.threshold=2)
+saveRDS(mmt, "neuronal.typeMarkers.rds")
+```
+
+```{r}
+sce <- sce[,colnames(so)]
+reducedDim(sce, "UMAP") <- Embeddings(so, "umap")
+sce$seurat_cluster <- so$seurat_clusters
+sce$celltype <- so$celltype
+sce$celltype <- factor(sce$celltype, sort(unique(sce$celltype)))
+sce$celltype2 <- gsub("/","\n",sce$celltype)
+sce$celltype2 <- factor(sce$celltype2, sort(unique(sce$celltype2)))
+
+sce$vd <- so$vd
+#levels(sce$celltype)[which(levels(sce$celltype)=="ExN.CA1-ProS-ve")] <- "ExN.CA1-ve-ProS"
+saveRDS(sce, "neuronal.SCE.rds")
+
+# sce <- readRDS("neuronal.SCE.rds")
+saveRDS(so, "neuronal.SO.rds")
+saveRDS(row.names(so), "hvg.neuronal.rds")
+rm(so)
+```
+
+
+```{r}
+pb <- sumCountsAcrossCells(sce,                           colData(sce)[,c("Sample","Treatment","TimePoint","GEM_batch","celltype")])
+colnames(pb) <- paste0(pb$celltype,".",pb$Sample)
+assays(pb)$CPM <- edgeR::cpm(calcNormFactors(DGEList(assay(pb))))
+assays(pb)$propOfMax <- assays(pb)$CPM/rowMax(assays(pb)$CPM)
+assays(pb)$logcpm <- log1p(assays(pb)$CPM)
+pb <- pb[,order(pb$celltype, pb$TimePoint, pb$Treatment)]
+
+metadata(pb)$default_view <- list(assay <- "scaledLFC",
+                                  groupvar <- "TimePoint",
+                                  colvar <- "Treatment",
+                                  gridvar <- "celltype2")
+assays(pb)$CPM <- NULL
+names(assays(pb))[1] <- "counts"
+
+saveRDS(pb, "neuronal.celltype.PB.rds")
+
+sechm(pb, genes, assayName = "propOfMax", do.scale=FALSE, hmcols=viridis::viridis(100), 
+        row_names_gp=gpar(fontsize=7), row_title_rot=0, gaps_at="celltype",
+      top_annotation=c("ncells","TimePoint"), show_rownames = TRUE)
+```
+
+```{r}
+deNovo <- lapply(split(mmt$gene,mmt$cluster), head)
+pb$celltype2 <- pb$celltype
+levels(pb$celltype2) <- gsub("\\.|/","\n",levels(pb$celltype))
+sechm(pb, deNovo, assayName = "propOfMax", do.scale=FALSE, hmcols=viridis::viridis(100), 
+        row_names_gp=gpar(fontsize=7), row_title_rot=0, gaps_at="celltype2",
+      top_annotation=c("ncells","TimePoint"), show_rownames = TRUE)
+```
+
+```{r}
+sessionInfo()
+```
+

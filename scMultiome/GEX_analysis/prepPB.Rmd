@@ -1,0 +1,57 @@
+---
+title: "Prepare PB objects for app"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SummarizedExperiment)
+})
+```
+
+```{r}
+pb <- readRDS("neuronal.celltype.PB.rds")
+deas <- readRDS("neuronal.DEA.rds")
+deas <- split(deas[,c("gene","logFC","logCPM","p_val","p_adj.loc","ihw")], paste(deas$cluster_id, deas$Comparison, sep="."))
+deas <- deas[grep("Any",names(deas),invert=TRUE)]
+for(f in names(deas)){
+  x <- deas[[f]]
+  row.names(x) <- x$gene
+  rowData(pb)[[paste0("DEA.",f)]] <- x[row.names(pb),]
+}
+metadata(pb)$default_view <- list(assay <- "scaledLFC",
+                                  groupvar <- "TimePoint",
+                                  colvar <- "Treatment",
+                                  gridvar <- "celltype2")
+assays(pb)$CPM <- NULL
+names(assays(pb))[1] <- "counts"
+metadata(pb)$name <- "CRS8_scRNA_neurons_PB"
+metadata(pb)$title <- "Neuronal transcriptomes from the chronic stress multiomic"
+metadata(pb)$description <- "Pseudobulk of the different neuronal subpopulations in the single-cell RNA from Rebecca's chronic stress multi-omic time-course dataset (CRS8)."
+saveRDS(pb, file="/mnt/bohacek/SEs_for_SEV/CRS8.scRNA.neurons.SE.rds")
+```
+
+```{r}
+pb <- readRDS("nonNeuronal.broad.PB.rds")
+deas <- readRDS("nonNeuronal.DEA.rds")
+deas <- split(deas[,c("gene","logFC","logCPM","p_val","p_adj.loc","ihw")], paste(deas$cluster_id, deas$Comparison, sep="."))
+deas <- deas[grep("Any",names(deas),invert=TRUE)]
+for(f in names(deas)){
+  x <- deas[[f]]
+  row.names(x) <- x$gene
+  rowData(pb)[[paste0("DEA.",f)]] <- x[row.names(pb),]
+}
+metadata(pb)$default_view$assay <- "scaledLFC"
+metadata(pb)$default_view$groupvar <- "TimePoint"
+metadata(pb)$default_view$colvar <- "Treatment"
+metadata(pb)$default_view$gridvar <- "broadClass"
+assays(pb)$CPM <- NULL
+names(assays(pb))[1] <- "counts"
+metadata(pb)$name <- "CRS8_scRNA_nonNeuronal_PB"
+metadata(pb)$title <- "Non-neuronal transcriptomes from the chronic stress multiomic"
+metadata(pb)$description <- "Pseudobulk of the broad non-neuronal cell classes in the single-cell RNA from Rebecca's chronic stress multi-omic time-course dataset (CRS8)."
+saveRDS(pb[,pb$broadClass!="unknown"], file="/mnt/bohacek/SEs_for_SEV/CRS8.scRNA.nonNeurons.SE.rds")
+```
+
+	
+
