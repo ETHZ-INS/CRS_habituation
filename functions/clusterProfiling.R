@@ -420,3 +420,19 @@ runTopGO <- function(genes, universe, collection=c("BP","MF","CC"), n=200,
   d$q <- p.adjust(d$Fisher, n=1000)
   d
 }
+
+
+# expects the merged SE object
+plotGenesProfs <- function(se, g, assayName="scaledLFC"){
+  d2 <- agg4Ribb(meltSE(se, g, assayName=assayName, rowDat.columns = NA), assayName, c("feature","stressor","TimePoint","time","offsetTime","type"))
+  assayName <- ensym(assayName)
+  p2a <- ggplot(d2, aes(time, !!assayName, group=interaction(stressor,type), colour=stressor, fill=stressor, linetype=type)) + 
+    geom_point() + geom_line(linewidth=1.2) + geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.3, colour=NA) + 
+    facet_grid(type~feature) + labs(x="Onset time (min)", y=assayName) + theme_bw()
+  p2b <- ggplot(d2, aes(offsetTime, !!assayName, group=interaction(stressor,type), colour=stressor, fill=stressor, linetype=type)) + 
+    geom_point() + geom_line(linewidth=1.2) + geom_ribbon(aes(ymin=lower, ymax=upper), alpha=0.3, colour=NA) + 
+    facet_grid(type~feature) + labs(x="Offset time (min)", y=assayName) + theme_bw()
+  
+  (p2a / p2b) + plot_layout(guides = "collect") & scale_x_continuous(breaks=c(0,90,300))
+  
+}

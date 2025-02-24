@@ -49,12 +49,35 @@ mores2 <- dplyr::bind_rows(lapply(split(mores, paste(mores$coef,mores$celltype))
   x <- x[which(x$adj.P.Val.x<0.05),]
   x[head(order(x$P.Value.x),5),]
 }))
-(p <- ggplot(mores, aes(logFC, -log10(adj.P.Val.x), colour=adj.P.Val.x<0.05)) + geom_point_rast(size=1) + 
-  ggrepel::geom_text_repel(data=mores2, aes(label=rn), size=3, min.segment.length = 0, color="black") +
-  facet_wrap(~celltype+coef, nrow=9, dir="h") + theme_bw() +
-    scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue")) +
-  labs(color="significant", y="-log10(FDR)") + #coord_cartesian(xlim=c(-4,4)) +
-    theme(legend.position="bottom"))
+mores$significance <- ifelse(mores$adj.P.Val.x<0.05, ifelse(mores$logFC>0,"upregulated","downregulated"),"n.s.")
+mores$significance <- factor(mores$significance, c("upregulated","n.s.","downregulated"))
+
+dl <- split(mores, grepl("^ExN", mores$celltype) + 2*grepl("\\.CA", mores$celltype) + 10*grepl("^InhN", mores$celltype))[c("3","1","10","0")]
+doOneVp <- function(dea, legend=FALSE){
+  ggplot(dea, aes(logFC, -log10(adj.P.Val.x), colour=significance)) + geom_point_rast(size=1, raster.dpi = 150) + 
+    ggrepel::geom_text_repel(data=mores2[which(mores2$celltype %in% unique(dea$celltype)),,drop=FALSE], 
+                             aes(label=rn), size=3, min.segment.length = 0, color="black") +
+    facet_grid(coef~celltype) + theme_bw() +
+      scale_color_manual(values=setNames(c("darkred","darkgrey","darkblue"), levels(dea$significance))) +
+    labs(color="significance", y="-log10(FDR)") + scale_y_sqrt(breaks=c(2,5,10)) +
+      theme(legend.position=ifelse(legend,"right","none"), aspect.ratio=5/8)  
+}
+pp <- plot_grid(doOneVp(dl[[1]]), doOneVp(dl[[2]], legend = TRUE),
+          doOneVp(dl[[3]]), doOneVp(dl[[4]]), nrow=4)
+
+
+
+# (p <- ggplot(mores, aes(logFC, -log10(adj.P.Val.x), colour=significance)) + geom_point_rast(size=1, raster.dpi=200) + 
+#   ggrepel::geom_text_repel(data=mores2, aes(label=rn), size=3, min.segment.length = 0, color="black") +
+#   facet_wrap(~celltype+coef, nrow=9, dir="h") + theme_bw() +
+#     scale_color_manual(values=setNames(c("darkred","darkgrey","darkblue"), levels(mores$significance))) +
+#   labs(color="significant", y="-log10(FDR)") + #coord_cartesian(xlim=c(-4,4)) +
+#     theme(legend.position="bottom"))
 
 ```
 
+```{r, fig.width=15, fig.height=20}
+pdf("SXX_snATAC_motifVolcanos.pdf", width=15, height=20)
+pp
+dev.off()
+```

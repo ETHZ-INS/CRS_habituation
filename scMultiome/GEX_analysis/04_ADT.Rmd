@@ -1,0 +1,143 @@
+---
+title: "04_ADT_scores.Rmd"
+output: html_document
+date: "2024-12-10"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scater)
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(limma)
+  library(BiocParallel)
+})
+theme_set(theme_bw())
+source("functions.R")
+```
+
+```{r}
+sce <- readRDS("neuronal.SCE.rds")
+sce$celltype2 <- gsub("/","\n",sce$celltype)
+sce$celltype2 <- factor(sce$celltype2, sort(unique(sce$celltype2)))
+sce$celltype <- factor(sce$celltype, sort(as.character(unique(sce$celltype))))
+```
+
+```{r}
+neuroestimator <- readRDS("neuroestimator_activities.rds")
+sce$neuroestimator <- neuroestimator[colnames(sce),1]
+```
+
+
+```{r}
+deas <- readRDS("neuronal.DEA.rds")
+# remove clusters that are too small to be reliable
+deas <- deas[!grepl("CR|Ccn2",deas$cluster_id),]
+
+# excitatory RGs
+g1 <- deas$gene[which(deas$ihw<0.15 &  grepl("stressAny",deas$Comparison) & grepl("ExN",deas$cluster_id))]
+g2 <- deas$gene[which(deas$ihw<0.15 & abs(deas$logFC)>0.3 &  deas$logCPM>1 & grepl("15min$|45min$",deas$Comparison) & grepl("ExN",deas$cluster_id))]
+tt <- sort(table(c(g1,g2)))
+rge <- grep("Hbb|Hba|^mt-", names(tt)[tt>2], invert=TRUE, value=TRUE)
+
+# inhibitory RGs
+g1 <- deas$gene[which(deas$ihw<0.15 &  grepl("stressAny",deas$Comparison) & grepl("InhN",deas$cluster_id))]
+g2 <- deas$gene[which(deas$ihw<0.5 & abs(deas$logFC)>0.2 &  deas$logCPM>1 & grepl("15min$|45min$",deas$Comparison) & grepl("InhN",deas$cluster_id))]
+tt <- sort(table(c(g1,g2,rge)))
+rgi <- grep("Hbb|Hba|^mt-", names(tt)[tt>2], invert=TRUE, value=TRUE)
+
+sce$activity <- NA_real_
+wsc <- grep("ExN", sce$celltype)
+sce$activity[wsc] <- computeCellResponseCoefGlm(
+  deas[grepl("15min$|45min$",deas$Comparison) & deas$gene %in% rge & grepl("ExN",deas$cluster_id),],
+  sce=sce[,wsc], wCtrl=which(sce$TimePoint[wsc]=="Control"), indep.lfc = "weighted",
+  BPPARAM=MulticoreParam(10,progress=TRUE))
+wsc <- grep("InhN", sce$celltype)
+sce$activity[wsc] <- computeCellResponseCoefGlm(
+  deas[grepl("15min$|45min$",deas$Comparison) & deas$gene %in% rgi & grepl("InhN",deas$cluster_id),],
+  sce=sce[,wsc], wCtrl=which(sce$TimePoint[wsc]=="Control"), indep.lfc = "mean",
+  BPPARAM=MulticoreParam(5,progress=TRUE))
+
+w <- which(sce$TimePoint=="Control")
+sce$activity <- sce$activity-sapply(split(sce$activity[w],sce$celltype[w]),FUN=median,na.rm=TRUE)[sce$celltype]
+sce$ADT <- qtScale(pmax(0, sce$activity), qt=c(0,0.98))
+sce$meanAct <- rowMeans(cbind(sce$ADT, sce$neuroestimator), na.rm=TRUE)
+
+# cr <- AUCell_buildRankings(sce)
+# auc <- AUCell_calcAUC(list(activity=rg), cr, aucMaxRank=ceiling(0.1 * nrow(cr)))
+# sce$activity2 <- getAUC(auc)[1,]
+# AUCell scores discarded because they show more inter-replicate variation
+```
+
+
+```{r, fig.width=12, fig.height=15}
+met <- c(activity=0.5, ADT=0.5, neuroestimator=0.6, meanAct=0.5)
+d2 <- dplyr::bind_rows(lapply(setNames(names(met),names(met)), FUN=function(n){
+  aggregate(sce[[n]], by=as.data.frame(colData(sce)[,c("Sample","TimePoint","Treatment","celltype2")]), FUN=function(x) sum(x>met[[n]], na.rm=TRUE)/length(x))
+}), .id="method")
+
+d2 <- d2[!grepl("CR|Tshz2|Ccn2",d2$celltype2),]
+#d2 <- d2[grepl("ProS|Vip|Pvalb|Sst",d2$celltype2),]
+d2 <- d2[d2$method %in% c("activity","neuroestimator","ADT","meanAct"),]
+ggplot(d2[(grep("CA1|Vip|Pvalb",d2$celltype2)),], aes(TimePoint, x, fill=Treatment)) + geom_boxplot() + facet_grid(celltype2~method)
+ggplot(d2[(grep("meanAct",d2$method)),], aes(TimePoint, x, fill=Treatment)) + geom_boxplot() + facet_wrap(~celltype2+method)
+```
+
+
+
+
+```{r}
+saveRDS(sce, file="neuronal.SCE.rds")
+```
+
+
+
+
+# Non-neuronal
+
+```{r}
+sce <- readRDS("nonNeuronal.SCE.rds")
+deas <- readRDS("nonNeuronal.DEA.rds")
+# remove clusters that are too small to be reliable
+deas <- deas[!grepl("PVM|CR|other|cycling",deas$cluster_id),]
+
+tmp <- lapply(split(deas, deas$cluster_id, drop=TRUE), FUN=function(d){
+  g1 <- d$gene[which(d$ihw<0.05 &  grepl("stressAny",d$Comparison) & d$logCPM>1)]
+  d2 <- d[grepl("15min$|45min$|3h$",d$Comparison),]
+  g2 <- d2$gene[which(d2$ihw<0.15 & abs(d2$logFC)>0.3)]
+  rg <- intersect(g1,g2)
+  print(paste0(d$cluster_id[1],": ",length(rg)))
+  wsc <- which(sce$broadClass==as.character(d$cluster_id[1]))
+  computeCellResponseCoefGlm(d2[d2$gene %in% rg,], sce=sce[,wsc],
+                             wCtrl=which(sce$TimePoint[wsc]=="Control"),
+                             lfc.conditionAgg = "mean", ctfield = "broadClass")
+})
+names(tmp) <- NULL
+sce$activity <- unlist(tmp)[colnames(sce)]
+w <- which(sce$TimePoint=="Control")
+sce$ADT <- pmax(0,sce$activity-sapply(split(sce$activity[w],sce$broadClass[w]),FUN=median,na.rm=TRUE)[sce$broadClass])
+sce$ADT <- qtScale(sce$ADT, qt=c(0,0.98), by = sce$broadClass)
+```
+
+
+```{r, fig.width=12, fig.height=7}
+met <- c(activity=0.5, ADT=0.5)
+d2 <- dplyr::bind_rows(lapply(setNames(names(met),names(met)), FUN=function(n){
+  aggregate(sce[[n]], by=as.data.frame(colData(sce)[,c("Sample","TimePoint","Treatment","broadClass")]), FUN=function(x) sum(x>met[[n]], na.rm=TRUE)/length(x))
+}), .id="method")
+
+d2 <- d2[d2$broadClass %in% unique(deas$cluster_id),]
+ggplot(d2, aes(TimePoint, x, fill=Treatment)) + geom_boxplot() + facet_grid(method~broadClass)
+```
+
+```{r}
+saveRDS(sce, "nonNeuronal.SCE.rds")
+```
+
+
+```{r}
+sessionInfo()
+```
+

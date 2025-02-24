@@ -48,7 +48,8 @@ sp1 <- ggplot(d, aes(logFC.10days, logFC.20days)) + geom_vline(xintercept=0) + g
   geom_point(aes(alpha=-log10(minFDR))) + facet_wrap(~TimePoint, scales="free") + theme_bw() +
   labs(x="CRS:ARS Interaction logFC (10days)", y="CRS:ARS Interaction\nlogFC (20days)", alpha="FDR") +
   scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0))
-cortext <- paste0("cor=",round(cor(d$logFC.10days,d$logFC.20days),2))
+cc <- cor.test(d$logFC.10days,d$logFC.20days)
+cortext <- paste0("cor=",round(cc$estimate,2), "\np=", format(cc$p.value, digit=1))
 p3 <- ggplot(d, aes(logFC.10days, logFC.20days)) + 
   geom_vline(xintercept=0) + geom_hline(yintercept=0) +
   geom_abline(slope=1,intercept=0,linetype="dashed") + geom_smooth(method=MASS::rlm) +
@@ -56,6 +57,9 @@ p3 <- ggplot(d, aes(logFC.10days, logFC.20days)) +
   labs(x="CRS:ARS Interaction logFC (10days)", y="CRS:ARS Interaction\nlogFC (20days)", alpha="FDR") +
   scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0)) +
   annotate("text",label=cortext,y=-1,x=3,hjust=1)
+# pdf("crs_10_vs_20days_with_pval.pdf", width=4.5, height=3)
+# p3
+# dev.off()
 ```
 
 ```{r}

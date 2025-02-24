@@ -39,11 +39,19 @@ d <- d[which((d$FDR.10days<0.05 & abs(d$logFC.10days)>log2(1.15)) |
 d$TimePoint <- factor(d$TimePoint,unique(d$TimePoint))
 d$minFDR <- pmin(d$FDR.10days,d$FDR.20days)
 fdrbr <- c(0.01,0.0001,0.000001,10^-10)
-sp1 <- ggplot(d, aes(logFC.10days, logFC.20days)) + geom_vline(xintercept=0) + geom_hline(yintercept=0) +
+ct <- dplyr::bind_rows(lapply(split(d,d$TimePoint), FUN=function(x){
+  ct <- cor.test(x$logFC.10days, x$logFC.20days)
+  data.frame(lab=paste0("r=",round(ct$estimate,2),"\np=", format(ct$p.value, digit=1)),
+    logFC.10days=min(x$logFC.10days), logFC.20days=max(x$logFC.20days), TimePoint=x$TimePoint[1])
+}))
+ct$logFC.20days[2] <- 1.7
+sp1 <- ggplot(d, aes(logFC.10days, logFC.20days)) + 
+  geom_vline(xintercept=0,colour="darkgrey") + geom_hline(yintercept=0, colour="darkgrey") +
   geom_abline(slope=1,intercept=0,linetype="dashed") + geom_smooth(method=MASS::rlm) +
   geom_point(aes(alpha=-log10(minFDR))) + facet_wrap(~TimePoint, scales="free") + theme_bw() +
   labs(x="CRS:ARS Interaction logFC (10days)", y="CRS:ARS Interaction\nlogFC (20days)", alpha="FDR") +
-  scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0))
+  scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0)) +
+  geom_text(data=ct, aes(label=lab), hjust=0, vjust=1)
 ```
 
 

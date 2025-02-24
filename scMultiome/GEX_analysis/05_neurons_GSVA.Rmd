@@ -1,0 +1,50 @@
+---
+title: "neurons GSVA"
+output: html_document
+date: "2024-10-03"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GSVA)
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(BiocParallel)
+  library(limma)
+})
+sgo <- readRDS("/reference/synGO/synGO.20231201.mouseSymbols.rds")
+```
+
+```{r}
+deas <- readRDS("neuronal.DEA.rds")
+pb <- readRDS("neuronal.celltype.PB.rds")
+pb <- pb[row.names(pb) %in% unique(deas$gene[!is.na(deas$logFC)]),]
+#gsv1 <-gsv
+gsv <- gsvaParam(pb, sgo, assay="scaledLFC", minSize=5, maxSize=1000)
+gsv <- gsva(gsv, BPPARAM=MulticoreParam(8, progress=TRUE))
+metadata(gsv) <- metadata(pb)
+
+
+a <- pb[,pb$celltype=="ExN.CA1-ve"]
+a <- a[edgeR::filterByExpr(assay(a)),]
+a <- SEtools::svacor(a, ~Treatment*TimePoint, n.sv=1)
+gsv2 <- gsvaParam(a, sgo, assay="logcpm", minSize=5, maxSize=1000)
+gsv2 <- gsva(gsv2, BPPARAM=MulticoreParam(8, progress=TRUE))
+gsv2 <- SEtools::svacor(gsv2, ~Treatment*TimePoint, n.sv=1, useVST = FALSE)
+
+```
+
+```{r, fig.width=10, fig.height=6}
+res <- dplyr::bind_rows(lapply(setNames(unique(gsv$celltype2),unique(gsv$celltype2)), FUN=function(ct){
+  x <- gsv[,gsv$celltype2==ct]
+  mm <- model.matrix(~Treatment*TimePoint, data=as.data.frame(colData(x)))
+  res <- eBayes(lmFit(assay(x),mm))
+  res <- topTable(res,grep("^TimePoint",colnames(mm), value=TRUE),Inf)
+  res$term <- row.names(res)
+  res
+}), .id="celltype")
+res <- res[order(res$adj.P.Val),]
+sechm(gsv[,grep("SUB",gsv$celltype2)], head(res[grep("SUB",res$celltype),"term"]), gaps_at = "celltype2", row_names_gp=gpar(fontsize=9))
+```
+

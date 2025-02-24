@@ -1,0 +1,134 @@
+---
+title: "RNA neuronal DEA"
+output: html_document
+date: "2024-11-11"
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(sechm)
+  library(ggplot2)
+  library(patchwork)
+  library(edgeR)
+  library(scuttle)
+  library(Matrix)
+  library(muscat)
+  library(future)
+  library(BiocParallel)
+})
+theme_set(theme_bw())
+source("functions.R")
+```
+
+```{r}
+pb <- readRDS("nonNeuronal.broad.PB.rds")
+
+res <- bplapply(split(seq_len(ncol(pb)), pb$broadClass), BPPARAM=MulticoreParam(17, progress=TRUE), FUN=function(x){
+  se <- pb[,x]
+  if(median(se$ncells)>75){ 
+    set.seed(123)
+    se <- SEtools::svacor(se, ~TimePoint*Treatment, n.sv=1)
+    mm <- model.matrix(~SV1+TimePoint*Treatment, data=as.data.frame(colData(se)))
+    coRm <- -1:-2
+  }else{
+    se$SV1 <- NA_real_
+    assays(se)$corrected <- assays(se)$logcpm
+    mm <- model.matrix(~TimePoint*Treatment, data=as.data.frame(colData(se)))
+    coRm <- -1
+  }
+  se <- log2FC(se, "corrected", se$TimePoint=="Control" & se$Treatment=="Handling", isLog = TRUE)
+  dds <- calcNormFactors(DGEList(assay(se)), method="TMMwsp")
+  dds <- dds[filterByExpr(dds,mm,min.count=20),]
+  dds <- estimateDisp(dds,mm)
+  fit <- glmFit(dds,mm)
+  comps <- c(list(stressAny=grep("TimePoint",colnames(mm)),
+                treatAny=grep("Treatment",colnames(mm))),
+           lapply(setNames(seq_len(ncol(mm))[coRm],colnames(mm)[coRm]), FUN=identity))
+  deas <- lapply(comps, FUN=function(x){
+    as.data.frame(topTags(glmLRT(fit, coef=x), Inf))
+  })
+  list(se=se, deas=deas)
+})
+pb <- do.call(cbind, lapply(res, FUN=function(x) x$se))
+
+# produce a muscat-like table
+names(comps) <- comps <- names(res[[1]]$deas)
+res1 <- list(table=lapply(comps, FUN=function(co){
+  lapply(setNames(names(res),names(res)), FUN=function(ctn){
+    ct <- res[[ctn]]$deas[[co]]
+    ct <- ct[which(ct$logCPM>=1.5),]
+    ct$gene <- row.names(ct)
+    ct$p_adj.loc <- ct$FDR
+    ct$p_val <- ct$PValue
+    ct$cluster_id <- as.factor(ctn)
+    row.names(ct) <- NULL
+    ct
+  })
+}))
+names(res1) <- gsub("TimePoint","ARS",names(res1))
+
+# bulk FDR as covariate
+ud <- readRDS("../../../work/plger/CRS/rnaDEAs/all.unspliced.SE.rds")
+fd <- readRDS("../../../work/plger/CRS/rnaDEAs/all.full.SE.rds")
+bulkfdr <- setNames(rowMins(cbind(rowData(fd)$FDR,rowData(ud)$FDR),na.rm=TRUE),row.names(ud))
+bulkfdr[is.infinite(bulkfdr) | is.na(bulkfdr)] <- 2
+
+res <- applyIHWonMuscatRes(res=res1, pb=pb, bulkfdr = bulkfdr)
+pb <- res$pb
+res <- res$res
+
+ndegs <- sapply(res$table, FUN=function(x){
+  sapply(x, FUN=function(y){
+    sum(y$ihw<0.05,na.rm=TRUE)
+  })
+})
+
+res2 <- dplyr::bind_rows(lapply(res$table, FUN=dplyr::bind_rows), .id="Comparison")
+for(f in c("Comparison","cluster_id")) res2[[f]] <- factor(res2[[f]])
+res2$LR <- res2$PValue <- res2$FDR <- res2$coef <- NULL
+saveRDS(res2, "nonNeuronal.DEA.rds")
+
+metadata(pb)$anno_colors <- list(TimePoint=setNames(RColorBrewer::brewer.pal(4,"Reds"), levels(pb$TimePoint)),
+                                 Treatment=c(Handling="lightgrey", Restraint="midnightblue"))
+metadata(pb)$default_view <- list(top_annotation=c("TimePoint","Treatment"))
+saveRDS(pb, "nonNeuronal.broad.PB.rds")
+```
+
+```{r}
+# specific ihw for baseline restraint:
+pb <- readRDS("nonNeuronal.broad.PB.rds")
+dea1 <- getDEA(ud, "CRS.baseline")
+dea2 <- getDEA(fd, "CRS.baseline")
+dea2$FDR2 <- dea1[row.names(dea2),"FDR"]
+dea2 <- dea2[!is.na(dea2$logCPM),]
+dea2$minFDR <- pmin(dea2$FDR, dea2$FDR2, na.rm=TRUE)
+bulkfdr <- setNames(dea2$minFDR, row.names(dea2))
+res2 <- readRDS("nonNeuronal.DEA.rds")
+res2 <- res2[res2$Comparison=="TreatmentRestraint",]
+res2$bulkFDR <- bulkfdr[res2$gene]
+res2$bulkFDR[is.infinite(res2$bulkFDR) | is.na(res2$bulkFDR)] <- 2
+a <- IHW::ihw(res2$p_val, res2$bulkFDR, alpha=0.1)
+res2$ihw <- IHW::adj_pvalues(a)
+head(res2[order(res2$ihw, res2$p_val),])
+resR <- res2
+res2 <- readRDS("nonNeuronal.DEA.rds")
+res2 <- res2[res2$Comparison!="TreatmentRestraint",]
+res2 <- rbind(res2,resR)
+saveRDS(res2, file="nonNeuronal.DEA.rds")
+```
+
+
+
+```{r, fig.width=14, fig.height=8}
+res3 <- res2[!grepl("Any|Restraint",res2$Comparison),]
+tp <- c("15min","45min","3h")
+res3$Comparison <- factor(as.character(res3$Comparison), paste0("TimePoint",tp), paste0("ARS",tp))
+celltypeVolcanos(res3)
+```
+
+
+```{r}
+sessionInfo()
+```
+

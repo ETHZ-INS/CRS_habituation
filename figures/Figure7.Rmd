@@ -12,6 +12,7 @@ suppressPackageStartupMessages({
   library(patchwork)
   library(RColorBrewer)
   library(scater)
+  library(cowplot)
 })
 theme_set(theme_bw())
 source("../scMultiome/GEX_analysis/functions.R")
@@ -97,9 +98,12 @@ tests <- dplyr::bind_rows(lapply(split(ag, ag$celltype, drop=TRUE), FUN=function
   mod <- lm(p.meanAct~TimePoint*Treatment, data=d)
   ars.effect <- tail(lmtest::lrtest(lm(p.meanAct~Treatment, data=d), mod)$`Pr(>Chisq)`,1)
   crs.effect <- tail(lmtest::lrtest(lm(p.meanAct~TimePoint, data=d), mod)$`Pr(>Chisq)`,1)
-  data.frame(celltype=d$celltype[1],
+  data.frame(celltype=d$celltype[1], ars.p=ars.effect, crs.p=crs.effect,
              lab=paste0("ARS p=", format(ars.effect, digit=1), "\nCRS p=", format(crs.effect, digit=1)))
 }))
+tests$ars.q <- p.adjust(tests$ars.p, method="BH")
+tests$crs.q <- p.adjust(tests$crs.p, method="BH")
+tests$lab <- paste0("ARS q=", format(tests$ars.q, digit=1), "\nCRS q=", format(tests$crs.q, digit=1))
 
 
 pbprop <- ggplot(ag, aes(TimePoint, p.meanAct)) + 
@@ -146,10 +150,12 @@ tests <- dplyr::bind_rows(lapply(split(ag, ag$celltype, drop=TRUE), FUN=function
   mod <- lm(p.ADT~TimePoint*Treatment, data=d)
   ars.effect <- tail(lmtest::lrtest(lm(p.ADT~Treatment, data=d), mod)$`Pr(>Chisq)`,1)
   crs.effect <- tail(lmtest::lrtest(lm(p.ADT~TimePoint, data=d), mod)$`Pr(>Chisq)`,1)
-  data.frame(celltype=d$celltype[1],
+data.frame(celltype=d$celltype[1], ars.p=ars.effect, crs.p=crs.effect,
              lab=paste0("ARS p=", format(ars.effect, digit=1), "\nCRS p=", format(crs.effect, digit=1)))
 }))
-
+tests$ars.q <- p.adjust(tests$ars.p, method="BH")
+tests$crs.q <- p.adjust(tests$crs.p, method="BH")
+tests$lab <- paste0("ARS q=", format(tests$ars.q, digit=1), "\nCRS q=", format(tests$crs.q, digit=1))
 
 
 nprop <- ggplot(ag, aes(TimePoint, p.ADT)) + 
