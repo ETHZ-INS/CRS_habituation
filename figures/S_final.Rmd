@@ -225,13 +225,13 @@ ag2 <- aggregate(dd[,c("centered","log2FC","scaledLFC")], by=list(celltype=gsub(
 m <- merge(ag,ag2,by="celltype")
 m$celltype2 <- gsub("\\..+","",m$celltype)
 
-mod <- summary(lm(log2FC~logcpm, data=m))
+ct <- cor.test(m$log2FC, m$logcpm)
+ctlab <- paste0("r=",round(ct$estimate,2), "\np=", round(ct$p.value,3))
 otherCols <- c(InhN="#E69F00", astrocytes="#009E73",  microglia="#F0E442", oligodendrocyte="#56B4E9",  OPC="#0072B2", ExN="#D55E00", vascular="#CC79A7")
 grcor <- ggplot(m, aes(logcpm, log2FC)) + geom_smooth(method=MASS::rlm, alpha=0.2) + 
   theme_bw() + geom_point(aes(colour=celltype2), size=3) +
   scale_color_manual(values=otherCols) + 
-  annotate("text", label=paste0("p=",round(coef(mod)[2,4],3)),
-           x=3.5,y=23,hjust=0) +
+  annotate("text", label=ctlab, x=3.5,y=23,hjust=0) +
   labs(x="Nr3c1 (GR) expression (logcpm)", y="Relative change in\nGR motif accessibility",
        colour="Broad cell type")
 ```
