@@ -1,0 +1,490 @@
+---
+title: "Data import"
+date: "2024-07-17"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+    smooth_scroll: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+library(Signac)
+library(SingleCellExperiment)
+library(Seurat)
+library(data.table)
+library(GenomicRanges)
+library(ggplot2)
+library(BiocParallel)
+
+source("helpers.R")
+
+set.seed(42)
+```
+
+```{r}
+refGenome <- "mm10"
+refPath <- "/reference/Mus_musculus/cellranger/refdata-cellranger-arc-mm10-2020-A-2.0.0/genes/genes.gtf.gz"
+```
+
+# Import
+
+Convert to seurat object
+```{r, paths, eval=FALSE}
+# filtered_feature_bc_matrix.h5
+crDir <- "../cellranger"
+nSamples <- 24
+
+samples <- file.path(crDir, paste("sample",1:nSamples, 
+                                  "trimmed49_imp_rev/outs/filtered_feature_bc_matrix.h5", sep="_"))
+
+seos <- lapply(1:nSamples, function(i){
+  s <- samples[i]
+  cf <- Read10X_h5(s)
+  
+  cca <- CreateChromatinAssay(
+  counts = cf$Peaks,
+  sep = c(":", "-"),
+  fragments=file.path(crDir, paste("sample", i, "trimmed49_imp_rev/outs/atac_fragments.tsv.gz", sep="_")),
+  min.cells = 10,
+  min.features = 200)
+  
+  seo <- CreateSeuratObject(counts = cca, assay="peaks", project=paste("sample", i, sep="_"))
+})
+```
+
+Define common peak set:
+```{r, common peak set, eval=FALSE}
+cgr <- lapply(seos, function(seo){StringToGRanges(rownames(seo@assays$peaks$data))})
+cgrDt <- lapply(cgr, as.data.table)
+
+cgr <- do.call("c", cgr) 
+cgr <- reduce(cgr)
+
+cgrFlank <- cgr
+start(cgrFlank) <- GenomicRanges::start(cgr)-100
+end(cgrFlank) <- GenomicRanges::end(cgr)-100
+
+ov <- countOverlaps(cgr, cgrFlank)
+hist(ov-1)
+```
+
+Reprocess seurat objects: Only retaining unique peaks
+```{r, reprocess seurat objects with common peaks, eval=FALSE}
+# recompile feature matrices with common peaks
+pkms <- lapply(seos, function(seo){
+  pkm <- FeatureMatrix(fragments=Fragments(seo),
+                       features=cgr,
+                       cells=colnames(seo))
+  pkm
+})
+
+# compute chromatin assays
+ccaRes <- lapply(1:length(pkms), function(i){
+  pkm <- pkms[[i]]
+  cca <- CreateChromatinAssay(counts=pkm,
+                       fragments=file.path(crDir, 
+                                           paste("sample", i, 
+                                                        "trimmed49_imp_rev/outs/atac_fragments.tsv.gz", sep="_")))
+  })
+
+# convert to seurat objects
+seoRes <- lapply(1:length(ccaRes), function(i){
+  cca <- ccaRes[[i]]
+  CreateSeuratObject(counts = cca, assay = "peaks", project=paste("sample", i, sep="_"))
+})
+
+# merge seurat objects
+seom <- merge(seoRes[[1]], seoRes[[2]], add.cell.ids=c("sample_1", "sample_2"))
+for(i in 3:length(seoRes)){
+  seom <- merge(seom,seoRes[[i]], 
+                add.cell.ids=c("", paste("sample", i, sep="_")))
+}
+
+# rename columns
+library(stringr)
+colDt <- data.table(col_orig=colnames(seom@assays$peaks))
+colDt[,renamed:=tstrsplit(col_orig, split="sample_", keep=2)]
+colnames(seom) <- colDt$renamed
+
+# save raw object to disks
+saveRDS(seom, "seo_raw.rds")
+```
+
+Control matching names & barcodes
+```{r, rename fragments, eval=FALSE}
+seom <- readRDS("seo_raw.rds")
+
+frags <- lapply(1:length(Fragments(seom)), function(i){
+  colDt <- data.table(col_orig=names(Fragments(seom)[[i]]@cells))
+  colDt[,renamed:=tstrsplit(col_orig, split="sample_", keep=2)]
+  frag <- Fragments(seom)[[i]]
+  
+  cells <- frag@cells
+  names(cells) <- colDt$renamed
+  
+  frag <- CreateFragmentObject(path=frag@path, cells=cells)
+  frag
+})
+Fragments(seom) <- NULL
+Fragments(seom) <- frags
+```
+
+# Filter ATAC
+
+```{r, adding RNA annotation, eval=FALSE}
+library(stringr)
+#seom <- readRDS("seo_raw.rds")
+sce <- as.SingleCellExperiment(seom)
+
+# rename cell names
+colData(sce)$sample_barcode <- colnames(sce)
+colDt <- as.data.table(colData(sce))
+
+colDt[,sample_re:=paste0("S", sample_barcode)]
+colDt[,sample_re:=str_replace(sample_re, "_", ".")]
+colnames(sce) <- colDt$sample_re
+
+# read-in annotated RNA modality
+sceNrRNA <- readRDS("../GEX_analysis/neuronal.SCE.rds")
+sceNonNrRna <- readRDS("../GEX_analysis/nonNeuronal.SCE.rds")
+
+colnamesRe <- paste0("S", colnames(seom))
+colnamesRe <- str_replace(colnamesRe, "_", ".")
+seomNonNr <-  seom[,colnamesRe %in% colnames(sceNonNrRna)]
+seomNr <- seom[,colnamesRe %in% colnames(sceNrRNA)]
+```
+
+
+```{r, nucleosome signal and tss enrichment, eval=FALSE}
+# nucleosome signal
+seomNonNr <- NucleosomeSignal(seomNonNr, n=ncol(seomNonNr)*100, verbose=TRUE)
+seomNr <- NucleosomeSignal(seomNr, n=ncol(seomNr)*100, verbose=TRUE)
+
+# add annotation and tss enrichment
+annotation <- rtracklayer::import(refPath)
+genome(annotation) <- refGenome
+annotation$gene_biotype <- annotation$gene_type
+
+geneRanges <- annotation[annotation$gene_biotype=="protein_coding"]
+tssRanges <- GRanges(
+  seqnames = seqnames(geneRanges),
+  ranges = IRanges(start = start(geneRanges), width = 2),
+  strand = strand(geneRanges)
+)
+seqlevelsStyle(tssRanges) <- 'UCSC'
+tssRanges <- keepStandardChromosomes(tssRanges, pruning.mode = 'coarse')
+tssSubRanges <- tssRanges[sample(1:length(tssRanges), 2e5)]
+
+Annotation(seomNonNr) <- annotation
+seomNonNr <- TSSEnrichment(seomNonNr, tss.positions=tssSubRanges, fast=FALSE)
+
+Annotation(seomNr) <- annotation
+seomNr <- TSSEnrichment(seomNr, tss.positions=tssSubRanges, fast=FALSE)
+
+# annotate 
+seomNonNr$type <- "Non-neuronal"
+seomNr$type <- "Neuronal"
+
+# merge back together
+seom <- merge(seomNr, seomNonNr)
+saveRDS(seom, "seo_raw_annotated.rds")
+```
+
+```{r, qc plots ATAC, eval=FALSE}
+seom <- readRDS("seo_raw_annotated.rds")
+m <- as.data.table(read.delim("../CRS8_metadata.csv",header=TRUE,sep=";"))
+m[,sample:=paste("sample", TestNo, sep="_")]
+
+seom@meta.data <- merge(seom@meta.data, m, by.x=c("orig.ident"), by.y=c("sample"))
+
+qcCounts <- data.table(n_count_peaks=seom$nCount_peaks,
+                       n_feat_peaks=seom$nFeature_peaks,
+                       tss_enrichment=seom$TSS.enrichment,
+                       nuc_signal=seom$nucleosome_signal,
+                       sample=seom$orig.ident, 
+                       batch=as.factor(seom@meta.data$Library_batch))
+
+ggplot(qcCounts, aes(x=batch, y=tss_enrichment, color=batch))+
+   geom_boxplot()+
+   scale_y_sqrt()+
+   scale_fill_brewer()+
+   theme_bw()
+ 
+ggplot(qcCounts, aes(x=sample, y=tss_enrichment, color=batch))+
+   geom_boxplot()+
+   scale_color_brewer(palette="Dark2")+
+   ylab("TSS enrichment")+
+   theme_bw()
+ 
+ggplot(qcCounts, aes(x=batch, y=nuc_signal, color=batch))+
+   geom_boxplot()+
+   scale_y_sqrt()+
+   scale_color_brewer(palette="Dark2")+
+   ylab("Nucleosome signal")+
+   theme_bw()
+
+ggplot(qcCounts, aes(y=sample, x=nuc_signal, color=batch))+
+  geom_boxplot()+
+  scale_color_brewer(palette="Dark2")+
+  xlab("Nucleosome signal")+
+  theme_bw()
+
+ ggplot(qcCounts, aes(x=batch, y=n_count_peaks, color=batch))+
+   geom_boxplot()+
+   scale_y_log10()+
+   scale_fill_brewer()+
+   ylab("N counts Peaks")+
+   theme_bw()
+ 
+ggplot(qcCounts, aes(y=sample, x=n_count_peaks, color=batch))+
+  geom_boxplot()+
+  scale_color_brewer(palette="Dark2")+
+  xlab("Counts per peak")+
+  theme_bw()
+
+# groub by sample
+# TSSPlot(
+# FragmentHistogram
+# VlnPlot
+# or: 
+
+#TSSPlot(seom)
+#FragmentHistogram(seom, group.by="orig.ident")
+```
+
+```{r, density plots ATAC data, eval=FALSE}
+DensityScatter(seom, 
+               x='nCount_peaks', 
+               y='TSS.enrichment', 
+               log_x=TRUE, 
+               quantiles=TRUE)
+
+quantile(seom$nucleosome_signal, na.rm=TRUE)
+hist(seom$nucleosome_signal, breaks=100)
+```
+
+```{r, filter ATAC data, eval=TRUE}
+seomAnn <- readRDS("seo_raw_annotated.rds")
+
+# seomAnn <- subset(x=seomAnn,
+#                   subset=nCount_peaks > quantile(seomAnn$nCount_peaks, 0.05, na.rm=TRUE) &
+#                          TSS.enrichment > quantile(seomAnn$TSS.enrichment, 0.05, na.rm=TRUE) & # still very low
+#                          nucleosome_signal < 2)
+```
+
+# Recall peaks
+
+
+## Call Peaks
+
+```{r, recalling of peaks, eval=FALSE}
+peaks <- CallPeaks(seomAnn,
+                   group.by="type",
+                   macs2.path="/opt/miniconda3/bin/macs2")
+saveRDS(peaks, "recalled_peaks.rds")
+```
+
+# Get counts
+
+## Non-resized peaks
+```{r, create sceATAC non-resized, eval=TRUE}
+sceNrRNA <- readRDS("../GEX_analysis/neuronal.SCE.rds")
+sceNonNrRNA <- readRDS("../GEX_analysis/nonNeuronal.SCE.rds")
+
+filteredBarCodes <- unique(c(colData(sceNrRNA)$Barcode,
+                           colData(sceNonNrRNA)$Barcode))
+filteredBarcodesSamples <- unique(c(rownames(colData(sceNrRNA)), 
+                                  rownames(colData(sceNonNrRNA))))
+
+peaks <- readRDS("recalled_peaks.rds")
+
+fragFiles <- list.files("../cellranger", recursive=TRUE, full.names=TRUE)
+fragFiles <- fragFiles[grepl("atac_fragments.tsv.gz", fragFiles) & !grepl("tbi", fragFiles)]
+sampleNames <- unlist(tstrsplit(fragFiles, split="/", keep=3))
+
+countMats <- lapply(1:length(fragFiles), function(i){
+  message(i)
+  print(i)
+  file <- fragFiles[i]
+  sampleName <- sampleNames[i]
+  sampleName <- unlist(tstrsplit(sampleName, split="_", keep=2))
+  
+  frags <- fread(file, nThread=8)
+  frags <- frags[,1:4]
+  colnames(frags) <- c("chr", "start", "end", "barcode")
+  frags$score <- 1L
+  frags <- subset(frags, barcode %in% filteredBarCodes)
+  
+  countMat <- .genomicRangesMapping(peaks, frags, 
+                                    byCols=c("barcode"), 
+                                    aggregationFun=sum, 
+                                    scoreCol="score")
+  gc()
+
+  colnames(countMat) <- paste(paste0("S",sampleName), colnames(countMat), sep=".")
+  countMat <- countMat[,colnames(countMat) %in% filteredBarcodesSamples, drop=FALSE]
+  countMat
+})
+
+countMat <- Reduce(cbind, countMats[-1], countMats[[1]])
+sceATAC <- SingleCellExperiment(list(counts=countMat))
+rowRanges(sceATAC) <- peaks
+
+# subset by filtered ATAC data
+library(stringr)
+colnamesRe <- paste0("S", colnames(seomAnn))
+colnamesRe <- str_replace(colnamesRe, "_", ".")
+sceATAC <- sceATAC[,colnames(sceATAC) %in% colnamesRe]
+
+# annotate with RNA data
+sceNrAtac <- sceATAC[,colnames(sceATAC) %in% colnames(sceNrRNA)]
+colData(sceNrAtac) <- cbind(colData(sceNrAtac),
+                            colData(sceNrRNA)[rownames(colData(sceNrAtac)),
+                                              c("Sample", "Barcode",
+                                                "Treatment", "TimePoint",
+                                                "GEM_batch", "Library_batch", 
+                                                "scDblFinder.class",
+                                                "scDblFinder.class1", 
+                                                "celltype", 
+                                                "subsets_Mt_percent")])
+sceNrAtac <- sceNrAtac[peaks$peak_called_in!="Non-neuronal", ]
+saveRDS(sceNrAtac, "sce_neuronal_atac_filtered_non_resized.rds")
+
+sceNonNrAtac <- sceATAC[,colnames(sceATAC) %in% colnames(sceNonNrRNA)]
+colData(sceNonNrAtac) <- cbind(colData(sceNonNrAtac),
+                            colData(sceNonNrRNA)[rownames(colData(sceNonNrAtac)),
+                                              c("Sample", "Barcode",
+                                                "Treatment", "TimePoint",
+                                                "GEM_batch", "Library_batch", 
+                                                "scDblFinder.class",
+                                                "scDblFinder.class1", 
+                                                "broadClass",
+                                                "celltype", 
+                                                "subsets_Mt_percent")])
+sceNonNrAtac <- sceNonNrAtac[peaks$peak_called_in!="Neuronal", ]
+saveRDS(sceNonNrAtac, "sce_nonNeuronal_atac_filtered_non_resized.rds")
+```
+
+### Pseudobulking of ATAC data
+
+```{r, pseudobulks non-resized, eval=TRUE}
+library(muscat)
+sceNonNrAtac <- prepSCE(sceNonNrAtac, kid="broadClass", 
+                                      sid="Sample", 
+                                      gid="TimePoint")
+pbNonNr <- aggregateData(sceNonNrAtac, fun="sum")
+pbNonNr <- pbFlatten(pbNonNr, normalize=FALSE)
+rowRanges(pbNonNr) <- rowRanges(sceNonNrAtac)
+saveRDS(pbNonNr, "pbNonNr_non_resized.rds")
+
+sceNrAtac <- prepSCE(sceNrAtac, kid="celltype", sid="Sample", gid="TimePoint")
+pbNr <- aggregateData(sceNrAtac, fun="sum")
+pbNr <- pbFlatten(pbNr, normalize=FALSE)
+rowRanges(pbNr) <- rowRanges(sceNrAtac)
+saveRDS(pbNr, "pbNr_non_resized.rds")
+```
+
+## Resized peaks
+
+```{r, create sceATAC resized peaks, eval=TRUE}
+sceNrRNA <- readRDS("../GEX_analysis/neuronal.SCE.rds")
+sceNonNrRNA <- readRDS("../GEX_analysis/nonNeuronal.SCE.rds")
+#seomAnn <- readRDS("seo_raw_annotated.rds")
+
+filteredBarCodes <- unique(c(colData(sceNrRNA)$Barcode,
+                           colData(sceNonNrRNA)$Barcode))
+filteredBarcodesSamples <- unique(c(rownames(colData(sceNrRNA)), 
+                                  rownames(colData(sceNonNrRNA))))
+
+peaks <- readRDS("recalled_peaks.rds")
+peaks <- resize(peaks, width=500)
+
+fragFiles <- list.files("../cellranger", recursive=TRUE, full.names=TRUE)
+fragFiles <- fragFiles[grepl("atac_fragments.tsv.gz", fragFiles) & !grepl("tbi", fragFiles)]
+sampleNames <- unlist(tstrsplit(fragFiles, split="/", keep=3))
+
+countMats <- lapply(1:length(fragFiles), function(i){
+  message(i)
+  print(i)
+  file <- fragFiles[i]
+  sampleName <- sampleNames[i]
+  sampleName <- unlist(tstrsplit(sampleName, split="_", keep=2))
+  
+  frags <- fread(file, nThread=8)
+  frags <- frags[,1:4]
+  colnames(frags) <- c("chr", "start", "end", "barcode")
+  frags$score <- 1L
+  frags <- subset(frags, barcode %in% filteredBarCodes)
+  
+  countMat <- .genomicRangesMapping(peaks, frags, 
+                                    byCols=c("barcode"), 
+                                    aggregationFun=sum, 
+                                    scoreCol="score")
+  gc()
+
+  colnames(countMat) <- paste(paste0("S",sampleName), colnames(countMat), sep=".")
+  countMat <- countMat[,colnames(countMat) %in% filteredBarcodesSamples, drop=FALSE]
+  countMat
+})
+
+countMat <- Reduce(cbind, countMats[-1], countMats[[1]])
+sceATAC <- SingleCellExperiment(list(counts=countMat))
+rowRanges(sceATAC) <- peaks
+
+# subset by filtered ATAC data
+library(stringr)
+colnamesRe <- paste0("S", colnames(seomAnn))
+colnamesRe <- str_replace(colnamesRe, "_", ".")
+sceATAC <- sceATAC[,colnames(sceATAC) %in% colnamesRe]
+
+# annotate with RNA data
+sceNrAtac <- sceATAC[,colnames(sceATAC) %in% colnames(sceNrRNA)]
+colData(sceNrAtac) <- cbind(colData(sceNrAtac),
+                            colData(sceNrRNA)[rownames(colData(sceNrAtac)),
+                                              c("Sample", "Barcode",
+                                                "Treatment", "TimePoint",
+                                                "GEM_batch", "Library_batch", 
+                                                "scDblFinder.class",
+                                                "scDblFinder.class1", 
+                                                "celltype", 
+                                                "subsets_Mt_percent")])
+sceNrAtac <- sceNrAtac[peaks$peak_called_in!="Non-neuronal", ]
+saveRDS(sceNrAtac, "sce_neuronal_atac_filtered_resized.rds")
+
+sceNonNrAtac <- sceATAC[,colnames(sceATAC) %in% colnames(sceNonNrRNA)]
+colData(sceNonNrAtac) <- cbind(colData(sceNonNrAtac),
+                            colData(sceNonNrRNA)[rownames(colData(sceNonNrAtac)),
+                                              c("Sample", "Barcode",
+                                                "Treatment", "TimePoint",
+                                                "GEM_batch", "Library_batch", 
+                                                "scDblFinder.class",
+                                                "scDblFinder.class1", 
+                                                "broadClass",
+                                                "celltype", 
+                                                "subsets_Mt_percent")])
+sceNonNrAtac <- sceNonNrAtac[peaks$peak_called_in!="Neuronal", ]
+saveRDS(sceNonNrAtac, "sce_nonNeuronal_atac_filtered_resized.rds")
+```
+
+### Pseudobulking of ATAC data
+
+```{r, pseudobulks resized, eval=TRUE}
+library(muscat)
+sceNonNrAtac <- prepSCE(sceNonNrAtac, kid="broadClass", 
+                                      sid="Sample", 
+                                      gid="TimePoint")
+pbNonNr <- aggregateData(sceNonNrAtac, fun="sum")
+pbNonNr <- pbFlatten(pbNonNr, normalize=FALSE)
+rowRanges(pbNonNr) <- rowRanges(sceNonNrAtac)
+saveRDS(pbNonNr, "pbNonNr_resized.rds")
+
+sceNrAtac <- prepSCE(sceNrAtac, kid="celltype", sid="Sample", gid="TimePoint")
+pbNr <- aggregateData(sceNrAtac, fun="sum")
+pbNr <- pbFlatten(pbNr, normalize=FALSE)
+rowRanges(pbNr) <- rowRanges(sceNrAtac)
+saveRDS(pbNr, "pbNr_resized.rds")
+```

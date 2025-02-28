@@ -1,0 +1,196 @@
+---
+title: "02.1 Differential Accessibility Non-neuronal cells"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+    smooth_scroll: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+library(chromVAR)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(SummarizedExperiment)
+library(motifmatchr)
+library(MotifDb)
+library(preprocessCore)
+library(universalmotif)
+library(TFBSTools)
+library(data.table)
+library(BiocParallel)
+library(limma)
+library(edgeR)
+library(stringr)
+library(sechm)
+library(ggplot2)
+library(patchwork)
+
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", 
+                "#009E73", "#F0E442", "#0072B2", 
+                "#D55E00", "#CC79A7")
+
+source("helpers.R")
+```
+
+Import data:
+```{r, data import, eval=TRUE}
+seOther <- readRDS("sce_nonNeuronal_atac_filtered_non_resized.rds")
+seOther$celltype <- seOther$broadClass
+seOther$broadClass <- NULL
+
+seNr <- readRDS("sce_neuronal_atac_filtered_non_resized.rds")
+#seNr <- seNr[,!(seNr$celltype %in% c("ExN.CR", "InhN.Ntng1", "N.Igfbpl1/Sema3c"))]
+```
+
+```{r, eval=FALSE}
+se <- cbind(seNr[rowRanges(seNr)$peak_called_in %in% c("Neuronal,Non-neuronal", 
+                                                       "Non-neuronal,Neuronal"),], 
+            seOther[rowRanges(seOther)$peak_called_in %in% c("Neuronal,Non-neuronal", 
+                                                             "Non-neuronal,Neuronal"),])
+library(Seurat)
+library(Signac)
+rownames(se) <- as.character(rowRanges(se))
+seo <- as.Seurat(se, counts="counts", data=NULL)
+
+seo <- RenameAssays(seo,
+                    assay.name = "originalexp",
+                    new.assay.name = "peaks")
+
+seo <- FindTopFeatures(seo, min.cutoff="q5")
+seo <- RunTFIDF(seo, method=3)
+ptm <- proc.time()
+seo <- RunSVD(seo, irlba.work=300)
+print(proc.time()-ptm)
+seo <- RunUMAP(seo, reduction = "lsi", dims = 2:50)
+saveRDS(seo, "seo_dim_red.rds")
+#p1 <- DimPlot(seoComb, group.by="sample")
+#p1
+```
+
+```{r,eval=FALSE}
+library(ggrastr)
+library(RColorBrewer)
+seo <- readRDS("seo_dim_red.rds")
+p1 <- DimPlot(seo, group.by="celltype")
+
+umapDt <- data.table(seo@reductions$umap@cell.embeddings, keep.rownames=TRUE)
+umapDt$celltype <- seo$celltype
+umapDt$sample <- seo$Sample
+umapDt$Treatment <- seo$Treatment
+umapDt$TimePoint <- seo$TimePoint
+umapDt$Library_batch <- seo$Library_batch
+umapDt$GEM_batch <- seo$GEM_batch
+
+celltypes <- unique(umapDt$celltype)
+
+exN <- celltypes[grepl("ExN", celltypes)]
+getExnCols = colorRampPalette(brewer.pal(9,name="Blues"))
+exnCols <- getExnCols(length(exN))
+names(exnCols) <- exN
+
+inhN <- celltypes[grepl("InhN", celltypes)]
+getInhnCols = colorRampPalette(brewer.pal(9,name="Oranges"))
+inhNCols <- getInhnCols(length(inhN))
+names(inhNCols) <- inhN
+
+otherCols <-  c("#56B4E9", "#E69F00", "#000000", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#009E73")
+names(otherCols) <- setdiff(celltypes, c(exN, inhN))
+ctCols <- c(exnCols, inhNCols, otherCols)
+
+umapDt$celltype <- as.character(umapDt$celltype)
+saveRDS(umapDt, "umapDt.rds")
+
+ggplot(umapDt, aes(x=umap_1, 
+                   y=umap_2, color=celltype)) +
+      # this layer will be rasterized:
+      ggrastr::rasterise(geom_point(size=0.9, alpha=0.6))+
+  guides(color=guide_legend(ncol=2, override.aes = list(size=2, alpha=1)))+
+  scale_color_manual(values=ctCols)+
+  theme_minimal()
+
+ggplot(umapDt, aes(x=umap_1, 
+                   y=umap_2, color=Treatment)) +
+      # this layer will be rasterized:
+      ggrastr::rasterise(geom_point(size=0.9, alpha=0.6))+
+  guides(color=guide_legend(ncol=2, override.aes = list(size=2, alpha=1)))+
+  scale_color_manual(values=cbbPalette)+
+  theme_minimal()
+
+ggplot(umapDt, aes(x=umap_1, 
+                   y=umap_2, color=TimePoint)) +
+      # this layer will be rasterized:
+      ggrastr::rasterise(geom_point(size=0.9, alpha=0.4))+
+  guides(color=guide_legend(ncol=2, override.aes = list(size=2, alpha=1)))+
+  scale_color_manual(values=cbbPalette)+
+  theme_minimal()
+
+ggplot(umapDt, aes(x=umap_1, 
+                   y=umap_2, color=TimePoint)) +
+      # this layer will be rasterized:
+  geom_density2d()+
+  guides(color=guide_legend(ncol=2, override.aes = list(size=2, alpha=1)))+
+  scale_color_manual(values=cbbPalette)+
+  theme_minimal()
+
+# check overlap with RNA-seq data
+```
+
+
+```{r, umap non-neuronal, eval=TRUE}
+library(Seurat)
+library(Signac)
+rownames(seOther) <- as.character(rowRanges(seOther))
+seo <- as.Seurat(seOther, counts="counts", data=NULL)
+
+seo <- RenameAssays(seo,
+                    assay.name = "originalexp",
+                    new.assay.name = "peaks")
+
+seo <- FindTopFeatures(seo, min.cutoff="q5")
+seo <- RunTFIDF(seo, method=3)
+ptm <- proc.time()
+seo <- RunSVD(seo, irlba.work=300)
+print(proc.time()-ptm)
+seo <- RunUMAP(seo, reduction = "lsi", dims = 2:50)
+
+umapDt <- data.table(seo@reductions$umap@cell.embeddings, keep.rownames=TRUE)
+umapDt$celltype <- seo$celltype
+umapDt$sample <- seo$Sample
+umapDt$Treatment <- seo$Treatment
+umapDt$TimePoint <- seo$TimePoint
+umapDt$Library_batch <- seo$Library_batch
+umapDt$GEM_batch <- seo$GEM_batch
+
+saveRDS(umapDt, "umapDtNonNeuronal.rds")
+```
+
+```{r, umap neuronal, eval=TRUE}
+library(Seurat)
+library(Signac)
+rownames(seNr) <- as.character(rowRanges(seNr))
+seo <- as.Seurat(seNr, counts="counts", data=NULL)
+
+seo <- RenameAssays(seo,
+                    assay.name = "originalexp",
+                    new.assay.name = "peaks")
+
+seo <- FindTopFeatures(seo, min.cutoff="q5")
+seo <- RunTFIDF(seo, method=3)
+ptm <- proc.time()
+seo <- RunSVD(seo, irlba.work=300)
+print(proc.time()-ptm)
+seo <- RunUMAP(seo, reduction = "lsi", dims = 2:50)
+
+umapDt <- data.table(seo@reductions$umap@cell.embeddings, keep.rownames=TRUE)
+umapDt$celltype <- seo$celltype
+umapDt$sample <- seo$Sample
+umapDt$Treatment <- seo$Treatment
+umapDt$TimePoint <- seo$TimePoint
+umapDt$Library_batch <- seo$Library_batch
+umapDt$GEM_batch <- seo$GEM_batch
+
+saveRDS(umapDt, "umapDtNeuronal.rds")
+```

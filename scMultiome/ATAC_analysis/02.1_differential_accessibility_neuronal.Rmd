@@ -1,0 +1,138 @@
+---
+title: "02.1 Differential Accessibility Neuronal cells"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+    smooth_scroll: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+library(chromVAR)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(SummarizedExperiment)
+library(motifmatchr)
+library(MotifDb)
+library(preprocessCore)
+library(universalmotif)
+library(TFBSTools)
+library(data.table)
+library(BiocParallel)
+library(limma)
+library(edgeR)
+library(stringr)
+library(sechm)
+library(ggplot2)
+library(patchwork)
+
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", 
+                "#009E73", "#F0E442", "#0072B2", 
+                "#D55E00", "#CC79A7")
+
+source("helpers.R")
+```
+
+Import:
+```{r, data import}
+pb <- readRDS("pbNr_non_resized.rds")
+se <- SummarizedExperiment(assays=assays(pb),
+                           colData=colData(pb),
+                           rowRanges=rowRanges(pb))
+se <- se[,!(se$cluster_id %in% c("ExN.CR", "InhN.Ntng1", "N.Igfbpl1/Sema3c"))]
+
+rangeDt <- as.data.table(rowRanges(se))
+rangeDt[,id:=1:nrow(rangeDt)]
+rangeDt <- subset(rangeDt, seqnames %in% standardChromosomes(se))
+se <- se[rangeDt$id,]
+colData(se)$group_m <- paste(colData(se)$group_id, 
+                             colData(se)$Treatment, sep=".")
+
+colData(se)$group_all <- paste(colData(se)$group_id, 
+                               colData(se)$Treatment,
+                               colData(se)$cluster_id, sep=".")
+```
+
+```{r, plot peak counts, fig.height=9, fig.width=14}
+countDt <- as.data.table(assays(se)$counts)
+countDt <- melt(countDt, variable.name="sample_celltype", value.name="count")
+countDt[,c("condition", "timepoint","sample_celltype"):=tstrsplit(sample_celltype, split="_")]
+countDt[,sample:=tstrsplit(sample_celltype, split=".", fixed=TRUE,keep=1)]
+countDt[,celltype:=str_remove(sample_celltype, "S*.")] #sub(".+? ", "", D$name)
+countDt[,celltype:=gsub("^[^.]*.","",celltype)]
+
+ggplot(countDt, aes(x=sample,y=count, color=condition, fill=timepoint))+
+scale_fill_brewer(palette="Blues")+
+scale_color_brewer(palette="Dark2")+
+facet_wrap(~celltype, nrow=4,ncol=5)+
+scale_y_log10()+
+geom_boxplot(outlier.shape=NA)+
+theme_bw()
+```
+
+# Differential accessibility testing
+
+```{r, differential accessibility testing}
+cts <- unique(colData(se)$cluster_id)
+
+ttSva <- lapply(cts, function(ct){
+  
+  seSub <- se[,se$cluster_id==ct]
+  
+  assay(seSub) <- as.matrix(assay(seSub))
+  row.names(seSub) <- as.character(granges(seSub))
+
+  assays(seSub)$logcpm <- log1p(edgeR::cpm(calcNormFactors(DGEList(assay(seSub)))))
+  mm <- model.matrix(~Treatment*group_id, data=as.data.frame(colData(seSub)))
+  colnames(mm) <- str_replace_all(colnames(mm), ":", ".")
+  seSub <- seSub[filterByExpr(seSub,mm),]
+  
+  set.seed(123)
+  seSub <- SEtools::svacor(seSub, ~Treatment*group_id, n.sv=1)
+  seSub <- seSub[,order(seSub$Treatment, seSub$group_id)]
+  
+  dds <- calcNormFactors(DGEList(assay(seSub)))
+  mm <- model.matrix(~SV1+Treatment*group_id,
+                   data=as.data.frame(colData(seSub)))
+  colnames(mm) <- str_replace_all(colnames(mm), ":", ".")
+  dds <- estimateDisp(dds, mm)
+
+
+  fit <- glmFit(dds, mm)
+  ttSva <- lapply(colnames(mm)[3:ncol(mm)], function(coef){
+    fit1 <- glmLRT(fit, coef=coef)
+    ttSva <- topTags(fit1, n=Inf, sort="none")
+    ttSva$coef <- coef
+    ttSva <- as.data.table(ttSva, keep.rownames=TRUE)
+    setnames(ttSva, "table.rn", "peak_id")
+    ttSva
+  })
+  ttSva <- rbindlist(ttSva)
+  ttSva$celltype <- ct
+  ttSva
+})
+
+ttSva <- rbindlist(ttSva)
+
+library(c212)
+# grouped FDR correction
+ttSva[,B:=paste(celltype, coef, sep="_")]
+ttGBHSva <- ttSva[,c("table.PValue", "peak_id", "table.PValue", "table.FDR", "B"), with=FALSE]
+suppressWarnings(setnames(ttGBHSva, c("table.PValue"), c("p")))
+padjGBHSva <- c212.GBH(ttGBHSva)
+padjGBHSva$sig_GBH <- TRUE
+ttSva <- merge(ttSva, padjGBHSva, 
+            by.x=c("B", "peak_id"),
+            by.y=c("B", "peak_id"), all.x=TRUE)
+ttSva[,sig_GBH:=fifelse(is.na(sig_GBH), FALSE, TRUE)]
+
+# add coefficients group 
+ttSva[,coef_group:=fifelse(coef %in% c("group_id15min", "group_id45min", "group_id3h"), "time", "condition")]
+ttSva[,coef_group:=fifelse(coef %in% c("TreatmentRestraint.group_id15min", 
+                                    "TreatmentRestraint.group_id45min", 
+                                    "TreatmentRestraint.group_id3h"), 
+                           "interaction: time*condition", coef_group)]
+saveRDS(ttSva, "da_sva_neuronal_crs.rds")
+```

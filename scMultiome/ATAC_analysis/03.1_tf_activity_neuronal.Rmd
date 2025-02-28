@@ -1,0 +1,206 @@
+---
+title: "02.2 Differential TF-activity Neuronal cells"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+    smooth_scroll: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, echo=FALSE, include=FALSE}
+library(chromVAR)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(SummarizedExperiment)
+library(motifmatchr)
+library(MotifDb)
+library(preprocessCore)
+library(universalmotif)
+library(TFBSTools)
+library(data.table)
+library(BiocParallel)
+library(limma)
+library(edgeR)
+library(stringr)
+library(sechm)
+library(ggplot2)
+library(patchwork)
+library(viridis)
+library(ggrepel)
+library(ggh4x)
+
+cbbPalette <- c("#000000", "#E69F00", "#56B4E9", 
+                "#009E73", "#F0E442", "#0072B2", 
+                "#D55E00", "#CC79A7")
+
+source("helpers.R")
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+normMethod <- "qnorm" #qnorm
+```
+
+```{r, data import, echo=FALSE}
+pb <- readRDS("pbNr_resized.rds")
+se <- SummarizedExperiment(assays=assays(pb),
+                           colData=colData(pb),
+                           rowRanges=rowRanges(pb))
+```
+
+# chromVAR z-scores
+
+For each cell type and time point, standard chromVAR analysis
+```{r, echo=FALSE}
+rangeDt <- as.data.table(rowRanges(se))
+rangeDt[,id:=1:nrow(rangeDt)]
+rangeDt <- subset(rangeDt, seqnames %in% standardChromosomes(se))
+se <- se[rangeDt$id,]
+
+# get gc content
+se <- suppressWarnings(addGCBias(se, genome=BSgenome.Mmusculus.UCSC.mm10))
+```
+
+```{r, echo=FALSE}
+motifs <- getNonRedundantMotifs(species="Mmusculus")
+peaks <- rowRanges(se)
+moi <- suppressWarnings(motifmatchr::matchMotifs(motifs, 
+                                                 subject=peaks, 
+                                                 genome=BSgenome.Mmusculus.UCSC.mm10))
+```
+
+```{r, chromVAR deviations, echo=FALSE}
+register(SerialParam())
+cts <- unique(colData(se)$cluster_id)
+
+# split-up by cell type
+devs <- lapply(cts, function(ct){
+  seSub <- se[, se$cluster_id==ct]
+  
+  # filter peaks
+  ix <- filterPeaks(seSub, ix_return=TRUE)
+  seSub <- seSub[ix,]
+  
+  # we select the background peaks
+  bg <- chromVAR::getBackgroundPeaks(seSub, niterations=2000)
+
+  # we select the background peaks
+  dev <- chromVAR::computeDeviations(object=seSub,
+                                     annotations=moi[ix,],
+                                     background_peaks=bg)
+  assays(dev)$norm <- scale(assays(dev)$z)
+  assays(dev)$centered <- scale(assays(dev)$z, scale=FALSE)
+  dev
+})
+names(devs) <- cts
+saveRDS(devs, "celltype_cvDevs_neuronal.rds")
+```
+
+```{r, eval=TRUE, echo=FALSE}
+devs <- readRDS("celltype_cvDevs_neuronal.rds")
+
+cts <- names(devs)
+devDt <- lapply(devs, function(dev){
+  dt <- as.data.table(assays(dev)$centered, keep.rownames=TRUE)
+  dt <- melt(dt, id.vars="rn", variable.name="sample", value.name="scaled_z")
+  dt[,c("condition", "timepoint"):=tstrsplit(sample, split="_", keep=1:2)]
+  dt
+})
+names(devDt) <- cts
+devDt <- rbindlist(devDt, idcol="celltype")
+
+ggplot(devDt, aes(x=scaled_z, group=sample))+
+  geom_density(aes(color=condition, lty=timepoint))+
+  facet_wrap(~celltype, nrow=4,ncol=5)+
+  xlim(c(-10,10))+
+  xlab("Centered z")+
+  theme_bw()
+
+devDt <- lapply(devs, function(dev){
+  dt <- as.data.table(assays(dev)$norm, keep.rownames=TRUE)
+  dt <- melt(dt, id.vars="rn", variable.name="sample", value.name="normed_z")
+  dt[,c("condition", "timepoint"):=tstrsplit(sample, split="_", keep=1:2)]
+  dt
+})
+names(devDt) <- cts
+devDt <- rbindlist(devDt, idcol="celltype")
+
+ggplot(devDt, aes(x=normed_z, group=sample))+
+  geom_density(aes(color=condition, lty=timepoint))+
+  facet_wrap(~celltype, nrow=4,ncol=5)+
+  xlim(c(-10,10))+
+  xlab("scaled & centered z")+
+  theme_bw()
+
+devDt <- lapply(devs, function(dev){
+  qn <- preprocessCore::normalize.quantiles(assays(dev)$z, keep.names=TRUE)
+  dt <- as.data.table(qn, keep.rownames=TRUE)
+  dt <- melt(dt, id.vars="rn", variable.name="sample", value.name="qnorm_z")
+  dt[,c("condition", "timepoint"):=tstrsplit(sample, split="_", keep=1:2)]
+  dt
+})
+names(devDt) <- cts
+devDt <- rbindlist(devDt, idcol="celltype")
+
+ggplot(devDt, aes(x=qnorm_z, group=sample))+
+  geom_density(aes(color=condition, lty=timepoint))+
+  facet_wrap(~celltype, nrow=4,ncol=5)+
+  xlim(c(-10,10))+
+  xlab("quantile normalized")+
+  theme_bw()
+```
+
+# Differential Activity analysis
+
+```{r, limma on motifs, echo=FALSE}
+tt <- lapply(cts, function(ct){
+
+  devSub <- devs[[ct]]
+  assays(devSub)$qn <- preprocessCore::normalize.quantiles(assays(devSub)$z, keep.names=TRUE)
+  
+  mm <- model.matrix(~Treatment*group_id, data=as.data.frame(colData(devSub)))
+  colnames(mm) <- str_replace_all(colnames(mm), ":", ".")
+  
+  if(normMethod=="centered")
+  {
+    fit1 <- lmFit(assays(devSub)$centered, mm)
+  }
+  else if(normMethod=="qnorm")
+  {
+    fit1 <- lmFit(assays(devSub)$qn, mm) 
+  }
+  
+  fit1 <- eBayes(fit1)
+  
+  tt <- lapply(colnames(mm)[2:ncol(mm)], function(coef) topTable(fit1, coef=coef, number=Inf))
+  tt <- lapply(tt, as.data.table, keep.rownames=TRUE)
+  names(tt) <- colnames(mm)[2:ncol(mm)]
+  tt <-  rbindlist(tt, fill=TRUE, idcol="coef")
+  tt$celltype <- ct
+  tt
+})
+tt <- rbindlist(tt, fill=TRUE)
+
+library(c212)
+# grouped FDR correction
+tt[,B:=paste(celltype, coef, sep="_")]
+ttGBH <- tt[,c("P.Value", "rn", "P.Value", "adj.P.Val", "B"), with=FALSE]
+suppressWarnings(setnames(ttGBH, c("P.Value"), c("p")))
+padjGBH <- c212.GBH(ttGBH)
+padjGBH$sig_GBH <- TRUE
+tt <- merge(tt, padjGBH, 
+            by.x=c("B", "rn"),
+            by.y=c("B", "rn"), all.x=TRUE)
+tt[,sig_GBH:=fifelse(is.na(sig_GBH), FALSE, TRUE)]
+
+# add coefficients group 
+tt[,coef_group:=fifelse(coef %in% c("group_id15min", "group_id45min", "group_id3h"), "time", "condition")]
+tt[,coef_group:=fifelse(coef %in% c("TreatmentRestraint.group_id15min", 
+                                    "TreatmentRestraint.group_id45min", 
+                                    "TreatmentRestraint.group_id3h"), 
+                           "interaction: time*condition", coef_group)]
+
+saveRDS(tt, paste("tt_neuronal_crs", paste0(normMethod,".rds"),sep="_"))
+```
