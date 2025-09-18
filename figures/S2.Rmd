@@ -48,7 +48,7 @@ ct$logFC.20days[2] <- 1.7
 sp1 <- ggplot(d, aes(logFC.10days, logFC.20days)) + 
   geom_vline(xintercept=0,colour="darkgrey") + geom_hline(yintercept=0, colour="darkgrey") +
   geom_abline(slope=1,intercept=0,linetype="dashed") + geom_smooth(method=MASS::rlm) +
-  geom_point(aes(alpha=-log10(minFDR))) + facet_wrap(~TimePoint, scales="free") + theme_bw() +
+  geom_point(aes(alpha=-log10(minFDR))) + facet_wrap(~TimePoint, scales="free") + mytheme() +
   labs(x="CRS:ARS Interaction logFC (10days)", y="CRS:ARS Interaction\nlogFC (20days)", alpha="FDR") +
   scale_alpha_continuous(breaks=-log10(fdrbr), labels=format(fdrbr,scipen=0)) +
   geom_text(data=ct, aes(label=lab), hjust=0, vjust=1)
@@ -74,70 +74,114 @@ gl2 <- list(
 )
 for(f in names(gl2)) rowData(se)[gl2[[f]],"metacluster"] <- f
 rowData(se)$metacluster <- factor(rowData(se)$metacluster, c(names(gl),names(gl2)))
-hm <- grid.grabExpr(draw(sechm(se, cl, gaps_at="TimePoint", assayName = "scaledLFC", row_title_gp=gpar(fontsize=12), column_title_gp=gpar(fontsize=12), left_annotation = "metacluster")))
+hm <- grid.grabExpr(draw(sechm(se, cl, gaps_at="TimePoint", assayName = "scaledLFC", row_title_gp=gpar(fontsize=12), column_title_gp=gpar(fontsize=12), left_annotation = "metacluster", bottom_annotation="Treatment")))
 ```
 
+
+
 ```{r}
-ora <- readRDS(file="../rnaDEAs/dampingClusters_enrichments.down.rds")
-ora$Cluster <- factor(ora$Cluster, levels(ora$Cluster)[c(3,2,1)])
-enr.down <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
-    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,8)) + 
-  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
-  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8),
-                       axis.title=element_blank()) + labs(fill="fold-\nenrichment") +
-  ggtitle("Downregulated")
+un <- readRDS("../rnaDEAs/all.unspliced.SE.rds")
+un <- un[,!(un$TimePoint %in% c("24h","5h30"))]
+un.tested <- row.names(getDEA(un)[[1]])
+#un.degs <- getDEGs(un, lfc.th = 0.1, fdr.th=0.25, merge=TRUE)
+#glun <- lapply(gl, intersect, y=un.degs)
+glun <- lapply(gl, intersect, y=un.tested)#un.degs)
+un <- updateSEforPlots(un)
+
+hm.un <- sechm(se[,!(se$TimePoint %in% c("24h","5h30"))], glun, gaps_at="TimePoint", gaps_row="cluster", assayName="scaledLFC", bottom_annotation="Treatment", row_title_rot = 0, top_annotation=c("TimePoint","Treatment"), column_title="Full\ntranscriptome", isMult = TRUE, row_title_gp=gpar(fontsize=12), column_title_gp=gpar(fontsize=12)) + 
+  sechm(un, glun, gaps_at="TimePoint", gaps_row="cluster", assayName="scaledLFC", bottom_annotation="Treatment", row_title_rot = 0, top_annotation=c("TimePoint","Treatment"), column_title="Active\ntranscription", column_title_gp=gpar(fontsize=12))
+hm.un
+```
+
+
+
+
+```{r}
+oraD <- readRDS(file="../rnaDEAs/dampingClusters_enrichments.down.rds")
+oraD$Cluster <- factor(oraD$Cluster, levels(oraD$Cluster)[c(3,2,1)])
+
+
+# enr.down <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+#     geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,8)) + 
+#   scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
+#   theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8),
+#                        axis.title=element_blank()) + labs(fill="fold-\nenrichment") +
+#   ggtitle("Downregulated")
 ```
 
 ```{r}
 en <- readRDS("../rnaDEAs/dampingClusters_enrichments.rds")
 gl.ora <- en$vsResponse$ORA
 sigTerms <- unique(unlist(lapply(gl.ora, FUN=function(x) head(row.names(x)[which(x$FDR<0.25)]))))
-ora <- dplyr::bind_rows(lapply(gl.ora, FUN=function(x){
+oraU <- dplyr::bind_rows(lapply(gl.ora, FUN=function(x){
   x <- x[sigTerms,]
   x$pathway <- sigTerms
   x
 }), .id="Cluster")
-ora$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",ora$pathway)))
-ora$Cluster <- factor(ora$Cluster, names(gl))
+oraU$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",oraU$pathway)))
+oraU$Cluster <- factor(oraU$Cluster, names(gl))
 
 
-enr.vsStress <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
-    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,12)) + 
-  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
-  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8), 
-                       axis.title=element_blank()) + labs(fill="fold-\nenrichment") +
-  ggtitle("Upregulated\nvs stress-responsive")
+# enr.vsStress <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+#     geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,12)) + 
+#   scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
+#   theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8), 
+#                        axis.title=element_blank()) + labs(fill="fold-\nenrichment") +
+#   ggtitle("Upregulated\nvs stress-responsive")
 ```
 
 ```{r}
 gl.ora <- en$vsExpressed$regulons
 sigTerms <- unique(unlist(lapply(gl.ora, FUN=function(x) head(row.names(x)[which(x$FDR<0.05)]))))
-ora <- dplyr::bind_rows(lapply(gl.ora, FUN=function(x){
+oraTF <- dplyr::bind_rows(lapply(gl.ora, FUN=function(x){
   x <- x[sigTerms,]
   x$pathway <- sigTerms
   x
 }), .id="Cluster")
-ora$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",ora$pathway)))
-ora$Cluster <- factor(ora$Cluster, names(gl))
+oraTF$pathway <- breakStrings(gsub("_"," ",gsub("^[A-Z]*:.*:","",oraTF$pathway)))
+oraTF$Cluster <- factor(oraTF$Cluster, names(gl))
 
 
-enr.tfs <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
-    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,12)) + 
-  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
-  theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8), 
-                       axis.title=element_blank()) + labs(fill="fold-\nenrichment") +
-  ggtitle("TF targets\nenrichment")
-
+# enr.tfs <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+#     geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,12)) + 
+#   scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + 
+#   theme_bw() + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8), 
+#                        axis.title=element_blank()) + labs(fill="fold-\nenrichment") +
+#   ggtitle("TF targets\nenrichment")
 ```
+
+```{r, fig.width=11, fig.height=5}
+ll <- list("TF targets"=oraTF, "Upregulated vs\nstress-responsive"=oraU, "Downregulated"=oraD)
+ora <- dplyr::bind_rows(ll, .id="Type")
+ora$Type <- factor(ora$Type, levels=names(ll))
+
+enrP <- ggplot(ora, aes(Cluster, pathway, size=-log10(pvalue), fill=enrichment, colour=FDR<0.05)) + 
+    geom_point(pch=21) + scale_fill_gradient2() + scale_size_continuous(range=c(2,12), breaks=c(0,5,10)) + 
+  scale_colour_manual(values=c("FALSE"="white", "TRUE"="black")) + facet_wrap(~Type, scale="free", nrow=1) + 
+  mytheme(FALSE) + theme(axis.text.x=element_text(angle=90, hjust=1,vjust=0.5), axis.text.y=element_text(size=8), 
+                       axis.title=element_blank(), axis.line=element_blank(), axis.ticks = element_blank()) +
+  labs(fill="fold-\nenrichment")
+enrP
+```
+
 
 
 ```{r, fig.width=11, fig.height=13}
 pdf("S2.pdf", width=11, height=13)
+# cowplot::plot_grid(
+#   sp1,
+#   plot_grid(
+#     plot_grid(hm, grid.grabExpr(draw(hm.un, merge=TRUE), wrap.grobs = TRUE), nrow=2, labels=c("B","C"), scale=0.95),
+#     plot_grid(enr.tfs, enr.vsStress, enr.down, nrow=3, labels=LETTERS[4:6], scale=0.95), nrow=1),
+#   scale=c(0.95,1), labels=c("A",NA), nrow=2, rel_heights=c(2,5,5)
+# )
+
 cowplot::plot_grid(
   sp1,
-  plot_grid(hm, enr.tfs, nrow=1, rel_widths = c(2,1), scale=0.95, labels=c("B","C")),
-  plot_grid(enr.vsStress, enr.down, nrow=1, labels=c("D","E"), scale=0.95),
-  scale=c(0.95,1,1), labels=c("A",NA,NA), nrow=3, rel_heights=c(2,4,4)
+  plot_grid(hm, grid.grabExpr(draw(hm.un, show_annotation_legend=FALSE), wrap.grobs = TRUE), nrow=1, labels=c("B","C"), scale=0.95, rel_widths=c(6,4.5)),
+  enrP, 
+  scale=c(0.95,1,0.95), labels=c("A",NA,"D"), nrow=3, rel_heights=c(2,4.7,4.5)
 )
+
 dev.off()
 ```
