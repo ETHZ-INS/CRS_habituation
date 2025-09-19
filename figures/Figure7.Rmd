@@ -14,7 +14,6 @@ suppressPackageStartupMessages({
   library(scater)
   library(cowplot)
 })
-theme_set(theme_bw())
 source("../scMultiome/GEX_analysis/functions.R")
 source("../functions/functions.R")
 options(ggrastr.default.dpi=600)
@@ -40,7 +39,7 @@ uact
 
 
 ```{r}
-cols <- c("Handling +ARS"="darkgrey", "CRS +ARS"="#0000CD96")
+cols <- c("Handling +ARS"="grey", "CRS +ARS"="#7964ffff")
 tt <- split(sce$activity2>0.5, sce$Sample)
 d <- data.frame(sample=names(tt), Treatment=factor(gsub("_.+","",names(tt))),
                 TimePoint=sapply(strsplit(names(tt),"_"), \(x) x[2]),
@@ -53,12 +52,14 @@ ars.effect <- tail(lmtest::lrtest(lm(propActivated~Treatment, data=d), mod)$`Pr(
 crs.effect <- tail(lmtest::lrtest(lm(propActivated~TimePoint, data=d), mod)$`Pr(>Chisq)`,1)
 lab <- paste0("ARS p=", format(ars.effect, digit=1), "\nCRS p=", format(crs.effect, digit=1))
 
-propAct <- ggplot(d, aes(TimePoint, propActivated, fill=Treatment)) + geom_boxplot() +
+
+propAct <- ggplot(d, aes(TimePoint, propActivated)) + 
     stat_summary(fun=mean, geom="line", aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment), linewidth=1.2)  + 
-    theme_bw() + labs(y="Proportion of\nneurons activated") + ylim(0,NA) +
+  geom_boxplot(aes(fill=Treatment)) + scale_x_discrete() +
+    mytheme() + labs(y="Proportion of\nneurons activated") + ylim(0,NA) +
   scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
   theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
-  annotate("text", y=0, x=0.5, label=lab, hjust=0, vjust=0, size=3.5)
+  annotate("text", y=0, x=0.5, label=lab, hjust=0, vjust=0, size=3.5)+ xlab(NULL)
 
 
 
@@ -71,12 +72,13 @@ ars.effect <- tail(lmtest::lrtest(lm(ADT~Treatment, data=d), mod)$`Pr(>Chisq)`,1
 crs.effect <- tail(lmtest::lrtest(lm(ADT~TimePoint, data=d), mod)$`Pr(>Chisq)`,1)
 lab <- paste0("ARS p=", format(ars.effect, digit=1), "\nCRS p=", format(crs.effect, digit=1))
 
-actADT <- ggplot(d, aes(TimePoint, ADT, fill=Treatment)) + geom_boxplot() +
+actADT <- ggplot(d, aes(TimePoint, ADT, fill=Treatment)) + 
   stat_summary(fun=mean, geom="line", aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment), linewidth=1.2)  + 
-  theme_bw() + labs(y="median ADT score of\nactivated neurons") + ylim(0,NA) +
+  geom_boxplot() + scale_x_discrete() +
+  mytheme() + labs(y="median ADT score of\nactivated neurons") + ylim(0,NA) +
   scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
   theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
-  annotate("text", y=0, x=0.5, label=lab, hjust=0, vjust=0, size=3.5)
+  annotate("text", y=0, x=0.5, label=lab, hjust=0, vjust=0, size=3.5)+ xlab(NULL)
 
 
 activated <- free(uact + theme_void()) + ( (propAct | actADT) + patchwork::plot_layout(guides="collect") & theme(legend.position = "bottom")) + plot_annotation(tag_levels = "A")
@@ -108,12 +110,13 @@ tests$lab <- paste0("ARS q=", format(tests$ars.q, digit=1), "\nCRS q=", format(t
 
 pbprop <- ggplot(ag, aes(TimePoint, p.meanAct)) + 
     stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment)) + 
-    geom_boxplot(alpha=0.8, aes(fill=Treatment)) + facet_wrap(~celltype, nrow=3) +
-    theme_bw() + labs(y="Proportion activated (ADT>0.5)") + 
+    geom_boxplot(aes(fill=Treatment)) + facet_wrap(~celltype, nrow=3, scales="free_x") +
+    mytheme() + labs(y="Proportion activated (ADT>0.5)") + 
   scale_x_discrete() + scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
     theme(legend.position=c(1, 0), legend.justification=c(1, 0),
-          axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
-  geom_text(data=tests, y=0.32, x=0.5, aes(label=lab), size=3, colour="black", hjust=0, vjust=1)
+          axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))+ xlab(NULL) +
+  #geom_text(data=tests, y=0.32, x=0.5, aes(label=lab), size=3, colour="black", hjust=0, vjust=1)
+  geom_text(data=tests, y=Inf, x=0.5, aes(label=lab), size=3, colour="black", hjust=0, vjust=1)
 ```
 
 ```{r, eval=FALSE}
@@ -160,11 +163,11 @@ tests$lab <- paste0("ARS q=", format(tests$ars.q, digit=1), "\nCRS q=", format(t
 
 nprop <- ggplot(ag, aes(TimePoint, p.ADT)) + 
     stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment)) + 
-    geom_boxplot(alpha=0.8, aes(fill=Treatment)) + facet_wrap(~celltype, nrow=2) +
-    theme_bw() + labs(y="Proportion activated (ADT>0.5)") + 
+    geom_boxplot(aes(fill=Treatment)) + facet_wrap(~celltype, nrow=2, scales="free_x") +
+    mytheme() + labs(y="Proportion activated (ADT>0.5)") + 
   scale_x_discrete() + scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
     theme(legend.position=c(1, 0), legend.justification=c(1, 0),
-          axis.text.x=element_text(angle=90, hjust=1, vjust=0.5)) +
+          axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))+ xlab(NULL) +
   geom_text(data=tests, y=0.73, x=0.5, aes(label=lab), size=2.5, colour="black", hjust=0, vjust=1)
 nuact + nprop
 ```
@@ -177,7 +180,7 @@ plot_grid(
   activated & theme(plot.tag = element_text(face = 'bold')),
   pbprop,
   plot_grid(nuact + theme_void(), nprop, labels=c("E","F"), scale=0.95, nrow=1),
-  nrow=3, rel_heights = c(2.5,3.9,2.5), scale=c(0.95,0.95,1), labels=c(NA, "D", NA)
+  nrow=3, rel_heights = c(2.3,4,2.5), scale=c(0.95,0.95,1), labels=c(NA, "D", NA)
 )
 dev.off()
 ```

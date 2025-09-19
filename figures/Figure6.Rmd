@@ -1,5 +1,5 @@
 ---
-title: 'Figure 6 : sc CRS'
+title: 'Figure 5 : sc CRS'
 output: html_document
 date: "2024-10-27"
 ---
@@ -64,28 +64,32 @@ h2@row_names_param$anno@var_env$value <- gsub(" in .+","",h2@row_names_param$ann
 ```
 
 ```{r, fig.height=12, fig.width=10}
-plotGenes <- function(facets, nrow=1, qR=FALSE, ...){
+plotGenes <- function(d, res2, facets, nrow=1, qR=FALSE, breakTitles=TRUE, ...){
   d2 <- d[d$facet %in% facets,]
   d2$facet <- factor(d2$facet, facets)
-  res2 <- res2[which(res2$facet %in% facets),]
+  if(breakTitles){
+    levels(d2$facet) <- gsub(" in ", " in\n", levels(d2$facet))
+    res2$facet <- gsub(" in ", " in\n", res2$facet)
+  }
+  res2 <- res2[which(res2$facet %in% levels(d2$facet)),]
   ggplot(d2, aes(TimePoint, log2FC)) + 
     stat_summary(fun=mean, geom="line", linewidth=1.2,
                  aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment)) + 
-    geom_boxplot(aes(fill=Treatment)) + theme_bw() + scale_x_discrete() + 
-    facet_wrap(~facet, nrow=nrow, scales="free_y") +
+    geom_boxplot(aes(fill=Treatment)) + scale_x_discrete() + mytheme() +
+    facet_wrap(~facet, nrow=nrow, scales="free_y") + 
     scale_color_manual(values=cols) + scale_fill_manual(values=cols) + xlab(NULL) +
     geom_text(data=res2, aes(x=ifelse(qR,4,0.5), y=Inf, label=sig), colour="black",
               size=2.5, hjust=ifelse(qR,1,0), vjust=1.5) + 
-    theme(..., axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
+    theme(..., axis.text.x=element_text(angle=90, hjust=1, vjust=0.5), title=element_text(size=10))
 }
 
 res2$sig <- paste0("CRS q=",gsub("e-0", "e-", sprintf("%.0e", res2$ihw)))
 res2A <- res2
 
-cols <- c("Handling +ARS"="darkgrey", "CRS +ARS"="#0000CD96")
+cols <- c("Handling +ARS"="grey", "CRS +ARS"="#7964ffff")
 sel1 <- c("Fos in CA1-ve-ProS", "Fosb in CA1-ve-ProS", "Npas4 in CA1-ve-ProS", "Fkbp5 in microglia", "Egr1 in InhN.Pvalb","Cdkn1a in vascular")
 
-p1 <- plotGenes(sel1, legend.position="none")
+p1 <- plotGenes(d, res2A, sel1, legend.position="none")
 
 # sel2 <- c("Cacna1e in InhN.Pvalb", "Zfhx2 in OPC", "Pde1a in InhN.Vip", "Erbb4 in Mossy", "Vwf in vascular")
 res2 <- res[which(res$Comparison=="TreatmentRestraint" & res$ihw<0.05 & res$logCPM>=2 & 
@@ -95,17 +99,20 @@ res2$facet <- paste0(res2$gene, " in ", gsub("ExN\\.","",res2$celltype))
 res2 <- res2[order(res2$ihw),]
 res2 <- dplyr::bind_rows(lapply(split(res2,res2$celltype), head, n=3))
 res2$sig <- paste0("CRS q=",gsub("e-0", "e-", sprintf("%.0e", res2$ihw)))
-p2 <- plotGenes(res2$facet, qR=TRUE)
+p2 <- plotGenes(d, res2, res2$facet, qR=TRUE)
+```
 
 
+```{r, fig.height=12, fig.width=10}
 pdf("Figure6.pdf", width=10, height=12)
 plot_grid(
   plot_grid(
     grid.grabExpr(draw(h, merge=TRUE)),
     grid.grabExpr(draw(h2, merge=TRUE)), nrow=1
   ),
-  p1, p2,
-  nrow=3, rel_heights = c(5,1.3,1.3), labels="AUTO", scale=0.95
+  p1 + theme(title=element_text(size=9.5)), p2 + theme(title=element_text(size=9.5)),
+  nrow=3, rel_heights = c(5.1,1.5,1.5), labels="AUTO", scale=0.95
 )
 dev.off()
 ```
+

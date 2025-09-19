@@ -34,7 +34,7 @@ doOneVp <- function(dea, legend=FALSE){
   ggplot(dea, aes(logFC, -log10(ihw), colour=significance)) + geom_point_rast(size=1, raster.dpi = 150) + 
     ggrepel::geom_text_repel(data=dea2[which(dea2$cluster_id %in% unique(dea$cluster_id)),,drop=FALSE], 
                              aes(label=gene), size=3, min.segment.length = 0, color="black") +
-    facet_grid(Comparison~cluster_id) + theme_bw() +
+    ggh4x::facet_grid2(Comparison~cluster_id, axes = TRUE) + mytheme() +
       scale_color_manual(values=setNames(c("darkred","darkgrey","darkblue"), levels(dea$significance))) +
     labs(color="significance", y="-log10(FDR)") + scale_y_sqrt(breaks=c(2,5,10)) +
       theme(legend.position=ifelse(legend,"right","none"), aspect.ratio=5/7)  
@@ -44,7 +44,7 @@ pp <- plot_grid(doOneVp(dl[[1]], TRUE) + coord_cartesian(xlim=c(-4,4)), doOneVp(
 ```
 
 ```{r, fig.width=15, fig.height=20}
-pdf("SXX_snRNA_volcanosARS.pdf", width=15, height=20)
+pdf("S6_snRNA_volcanosARS.pdf", width=15, height=20)
 pp
 dev.off()
 ```
@@ -66,9 +66,9 @@ dea2 <- dplyr::bind_rows(lapply(split(dea, paste(dea$cluster_id)), FUN=function(
 dea1 <- dea[which(dea$cluster_id %in% unique(dea2$cluster_id)),]
 p1 <- ggplot(dea1, aes(logFC, -log10(ihw), colour=significance)) + ggrastr::geom_point_rast(size=1) + 
   ggrepel::geom_text_repel(data=dea2, aes(label=gene), size=3, min.segment.length = 0, color="black") +
-  facet_wrap(~cluster_id, nrow=1) + theme_bw() +
+  facet_wrap(~cluster_id, nrow=1, scales="free") + mytheme() +
   scale_color_manual(values=setNames(c("darkblue","darkgrey","darkred"), levels(dea$significance))) +
-  labs(color="significant", y="-log10(FDR)") + scale_y_sqrt(breaks=c(2,5,10)) +
+  labs(color="significant", y="-log10(FDR)") + scale_y_sqrt(breaks=c(2,5,10), limits=c(0,5)) +
       theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
 
 # dea <- dplyr::bind_rows(list(Neuronal=ne, nonNeuronal=nn), .id="Class")
@@ -108,12 +108,12 @@ m$lab <- paste0("ARS q=", format(m$ihw, digit=1),"\n",
 d <- d[which(paste(d$cluster_id,d$feature) %in% paste(m$cluster_id,m$feature)),]
 npas4 <- ggplot(d, aes(TimePoint, logcpm)) + 
   stat_summary(fun=mean, geom="line", linewidth=1.2, aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment))  +
-  geom_boxplot(aes(fill=Treatment)) + facet_wrap(~feature+celltype2, nrow=2) + theme_bw() + labs(y="Expression log(CPM)") +
+  geom_boxplot(aes(fill=Treatment)) + facet_wrap(~feature+celltype2, nrow=2, scales="free_x") + mytheme() + labs(y="Expression log(CPM)") +
   geom_text(data=m, y=0, x=4.5, aes(label=lab), size=3, colour="black", hjust=1, vjust=0) +
   scale_color_manual(values=cols) + scale_fill_manual(values=cols) + scale_x_discrete() +
   theme(legend.position = "bottom", axis.text.x=element_text(angle=90, hjust=1, vjust=0.5))
 
-pdf("SXX_snRNA_baselineCRS_and_Npas4.pdf", width=12, height=12)
+pdf("S7_snRNA_baselineCRS_and_Npas4.pdf", width=12, height=12)
 cowplot::plot_grid(p1, npas4, nrow=2, rel_heights=c(1,2), scale=0.95, labels = LETTERS)
 dev.off()
 ```

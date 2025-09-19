@@ -1,5 +1,12 @@
 setSechmOption("hmcols", value=colorspace::diverging_hcl(101,"Blue-Red 3"))
 
+mytheme <- function(xax=TRUE, strip.text.size=11){
+  tt <- theme_classic() + 
+    theme(strip.background=element_blank(), strip.text=element_text(size=strip.text.size))
+  if(!xax) tt <- tt + theme(axis.line.x = element_blank(), axis.ticks.x=element_blank())
+  tt
+}
+
 #' Perform staged-FDR for DEA interaction terms using the stageR package
 #'
 #' @param se A SummarizedExperiment object
@@ -287,10 +294,12 @@ plotGeneProf <- function(se, g, ...){
   dag <- agg4Ribb(d, "log2FC", by=c("Treatment","feature","TimePoint"), sem=TRUE)
   dag <- dag[which(!(dag$TimePoint %in% c("24h"))),]
   dag$Time <- c(0,45,90,180,240,5.5*60,24*60)[as.integer(dag$TimePoint)]
-  if(any(dag$Treatment=="Handling")){
-    crscols <- c(Handling = "grey", `10days CRS` = "blue3", `20days CRS` = "midnightblue")
+  if(any(grepl("\n",dag$Treatment,fixed=TRUE))){
+    crscols <- c("Handling\n +ARS" = "lightgray", `10days CRS\n +ARS` = "#7964ffff", `20days CRS\n +ARS` = "midnightblue")
+  }else if(any(dag$Treatment=="Handling")){
+    crscols <- c(Handling = "lightgrey", `10days CRS` = "#7964ffff", `20days CRS` = "midnightblue")
   }else{
-    crscols <- c("Handling +ARS" = "lightgray", `10days CRS +ARS` = "slateblue", `20days CRS +ARS` = "midnightblue")
+    crscols <- c("Handling +ARS" = "lightgray", `10days CRS +ARS` = "#7964ffff", `20days CRS +ARS` = "midnightblue")
   }
 
   ggplot(dag, aes(Time, log2FC, fill=Treatment)) +
@@ -369,10 +378,10 @@ updateSEforPlots <- function(se, dark=FALSE){
   
   se$Treatment <- factor(se$Treatment)
   if(any(grepl("days",levels(se$Treatment)))){
-    crscols <- c("Handling +ARS" = "lightgray", `10days CRS +ARS` = "slateblue", `20days CRS +ARS` = "midnightblue")
+    crscols <- c("Handling +ARS" = "lightgray", `10days CRS +ARS` = "#7964ffff", `20days CRS +ARS` = "midnightblue")
     levels(se$Treatment) <- gsub(" +ARS +ARS"," +ARS", paste0(levels(se$Treatment)," +ARS"), fixed=TRUE)
   }else{
-    crscols <- c("Handling +ARS"="darkgrey", "CRS +ARS"=ifelse(dark,"midnightblue","#0000CD96"))
+    crscols <- c("Handling +ARS"="lightgrey", "CRS +ARS"="#7964ffff")
     levels(se$Treatment) <- names(crscols)
   }
   if(!is.null(metadata(se)$anno_colors$Treatment))
@@ -380,3 +389,23 @@ updateSEforPlots <- function(se, dark=FALSE){
   se
 }
 
+boxplotColors <- function(p, cols){
+  if(inherits(cols, "SummarizedExperiment"))
+    cols <- metadata(cols)$anno_colors$Treatment
+  n <- names(cols)
+  cols2 <- sapply(cols, maketrans, alpha=180)
+  if(length(w <- which(cols=="lightgray"))>0){
+    cols2[w] <- "lightgrey"
+    cols[w] <- "grey40"
+  }
+  names(cols) <- names(cols2) <- n
+  p + scale_fill_manual(values=cols2) + scale_color_manual(values=cols)
+}
+  
+  
+
+maketrans <- function (tcol, alpha = 100) {
+  c <- col2rgb(tcol)
+  rgb(c["red", 1][[1]], c["green", 1][[1]], c["blue", 1][[1]], 
+      alpha, maxColorValue = 255)
+}

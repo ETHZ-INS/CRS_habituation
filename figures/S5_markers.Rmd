@@ -1,5 +1,5 @@
 ---
-title: 'Supplementary Figure comparing ADT to neuroestimator'
+title: 'Supplementary Figure with markers for neuronal celltypes'
 output: html_document
 date: "2024-10-27"
 ---
@@ -11,13 +11,13 @@ suppressPackageStartupMessages({
   library(patchwork)
   library(RColorBrewer)
   library(scater)
+  library(sechm)
 })
-theme_set(theme_bw())
 source("../scMultiome/GEX_analysis/functions.R")
 ```
 
 
-```{r, fig.height=13, fig.width=9}
+```{r, fig.height=12, fig.width=9}
 sce <- readRDS("../scMultiome/GEX_analysis/neuronal.SCE.rds")
 sce <- logNormCounts(sce)
 markers <- list(
@@ -43,17 +43,17 @@ d2$type <- ifelse(grepl("ExN", d2$ids), "excitatory", "inhibitory")
 d2$type[grep("^N\\.",d2$ids)] <- NA_character_
 
 p1 <- ggplot(d, aes(ids, feature, size=prop.detected, colour=propMax)) + geom_point() + 
-    facet_grid(cat~type, scale="free", space="free") + theme_bw() +
+    facet_grid(cat~type, scale="free", space="free") + mytheme() +
     theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
     scale_size(range=c(0,8)) + scale_color_viridis_c(direction = -1, option="rocket") + 
     labs(colour="Proportion of\nmaximum mean\nexpression", y="Markers", x="")
 
 p2 <- ggplot(d2, aes(ids, vd, fill=meanVD, group=ids)) + geom_hline(yintercept = 0) +
       geom_violin(scale = "width") + stat_summary(fun = "median") +
-  facet_grid(cols=vars(type), scales = "free_x", space="free") + 
+  facet_grid(cols=vars(type), scales = "free_x", space="free") + mytheme() +
   theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) + labs(x="", y="Ventral/Dorsal score") +
   scale_fill_gradient2(low = "darkred", mid="grey", high = "darkblue", breaks=c(-1,1), labels=c("dorsal","ventral"))
-pdf("SXX_markers.pdf", width=9, height=12)
+pdf("S5_markers.pdf", width=9, height=12)
 p2/p1 + plot_layout(heights=c(1.1,6))
 dev.off()
 ```

@@ -13,7 +13,6 @@ suppressPackageStartupMessages({
   library(RColorBrewer)
   library(scater)
 })
-theme_set(theme_bw())
 source("../scMultiome/GEX_analysis/functions.R")
 source("../functions/functions.R")
 cols <- c("Handling +ARS"="darkgrey", "CRS +ARS"="#0000CD96")
@@ -36,12 +35,14 @@ d2 <- d2[!grepl("CR|Ccn2|Fn1",d2$celltype2),]
 d2$method <- gsub("activity2","ADT",d2$method)
 d2$Treatment <- factor(d2$Treatment)
 levels(d2$Treatment) <- names(cols)
-pdf("SXX_ADT.pdf", width=10, height=10)
+
+pdf("S8_ADT.pdf", width=10, height=10)
 ggplot(d2, aes(TimePoint, x, fill=Treatment)) + geom_boxplot() +
     stat_summary(fun=mean, geom="line", aes(x=as.integer(TimePoint), group=Treatment, colour=Treatment), linewidth=1.2)  + 
-    theme_bw() + labs(y="Proportion of neurons activated") + ylim(0,NA) +
+    theme_bw() + mytheme() + labs(y="Proportion of neurons activated") + ylim(0,NA) +
   scale_color_manual(values=cols) + scale_fill_manual(values=cols) +
-  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5),
+  theme(axis.text.x=element_text(angle=90, hjust=1, vjust=0.5), strip.text = element_text(size=10),
         legend.position=c(1, 0), legend.justification=c(2, 0)) +
-  facet_wrap(~celltype2+method, ncol=8)
+  facet_wrap(~celltype2+method, ncol=8, scales="free_x")
+dev.off()
 ```

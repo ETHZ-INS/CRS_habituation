@@ -22,6 +22,7 @@ ensdb <- ah[["AH89211"]]
 
 source("../functions/functions.R")
 source("../functions/clusterProfiling.R")
+TFcols <- c("FALSE"="darkgrey", "TRUE"="darkblue")
 ```
 
 ```{r}
@@ -37,19 +38,19 @@ mds <- readRDS("../bulkATAC/mds_excludingSex.rds")
 mds$TimePoint <- mds$Group
 mds$Treatment <- factor(mds$Treatment, unique(mds$Treatment), levels(rse$Treatment))
 levels(mds$TimePoint) <- levels(rse$TimePoint)
-crscols <- c("Handling+ARS" = "darkgrey", "CRS+ARS" = "midnightblue")
+crscols <- c("Handling+ARS" = "darkgrey", "CRS+ARS" = "#7964ffff")
 mds$Group <- gsub("+","+\n",paste(mds$Treatment,mds$TimePoint),fixed=TRUE)
 mds <- mds[order(mds$TimePoint, mds$Treatment),]
 mds$Group <- factor(mds$Group, unique(mds$Group))
-cols <- setNames(c("darkgrey","lightblue","gray15","midnightblue"), levels(mds$Group))
+cols <- setNames(c("darkgrey","lightblue","red","#7964ffff"), levels(mds$Group))
 ve <- attr(mds,"varExplained")
 mdp2 <- ggplot(mds, aes(x,y, colour=Group)) + 
   geom_hline(yintercept=-0.025, linetype="dashed", colour="darkgrey") + geom_point(size=3) +
     labs(x=paste0("MDS1 (",round(100*ve[1]),"% of variance)"),
-       y=paste0("MDS2 (",round(100*ve[2]),"% of variance)")) + theme_bw() +
+       y=paste0("MDS2 (",round(100*ve[2]),"% of variance)")) + mytheme() +
   scale_colour_manual(values=cols)
 mdp2.vl <- ggplot(mds, aes(TimePoint, y, fill=Group)) + geom_violin() + 
-  stat_summary(position=position_dodge2(width=0.9)) + theme_bw() +
+  stat_summary(position=position_dodge2(width=0.9)) + mytheme() +
   labs(x="TimePoint", y="MDS2") + scale_fill_manual(values=cols)
 mdp <- mdp2 + (mdp2.vl + theme(legend.position = "none"))+ plot_layout(widths=c(4,3))
 ```
@@ -61,10 +62,10 @@ rda$sig <- rda$FDR<0.05
 rvol <- ggplot(rda, aes(logFC, -log10(FDR))) + 
    ggrastr::geom_point_rast(size=0.8, colour="darkgrey") + 
    geom_point(data=rda[rda$sig,], size=0.8, aes(colour=sig)) + 
-   scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="blue3")) +
-   theme_bw() + theme(legend.position = "none") + coord_cartesian(xlim=c(-1.1,1.1))
-ggplot(rda, aes(logFC, -log10(FDR), colour=sig)) + geom_point()
-hm <- grid.grabExpr(draw(sechm(rse[,order(rse$Group, rse$Treatment)], row.names(rda)[which(rda$sig)], assayName = "log2FC", gaps_at="TimePoint", top_annotation=c("Group","Sex"), hmcols = c("blue","black","yellow")), merge=FALSE))
+   scale_color_manual(values=TFcols) +
+   mytheme() + theme(legend.position = "none") + coord_cartesian(xlim=c(-1.1,1.1)) +
+  scale_x_continuous(breaks=c(-1,0,1))
+hm <- grid.grabExpr(draw(sechm(rse[,order(rse$Group, rse$Treatment)], row.names(rda)[which(rda$sig)], assayName = "log2FC", gaps_at="TimePoint", top_annotation=c("Group","Sex"), hmcols = c("blue","black","yellow")), merge=FALSE))#, annotation_legend_side="bottom", heatmap_legend_side="bottom"))
 ```
 
 
@@ -74,12 +75,12 @@ bws <- split(paste0("../bulkATAC/tracks/",row.names(mds),".bw"), mds$Group)[leve
 #names(bws) <- gsub("+","+\n",names(bws),fixed=TRUE)
 
 gp <- list(col.line="grey40", col=NULL, fill="#000000", rotation.title=0)
-fkbp5 <- grid.grabExpr(plotSignalTracks(bws, p, ensdb, colors=cols, tracks.params = list(ylim=c(0,0.33),transformation=\(x) x, yTicksAt=c(0,0.3), cex.axis=0.55), aggregation="heatmap+mean", genes.params = gp, background.title=NA, cex.title = 0.6), wrap.grobs = TRUE)
-fkbp5b <- grid.grabExpr(plotSignalTracks(bws, p, ensdb, colors=cols, tracks.params = list(ylim=c(0,0.34^2),transformation=\(x) x^2, yTicksAt=c(0,0.1), cex.axis=0.55), aggregation="heatmap+mean", genes.params = gp, background.title=NA, cex.title = 0.6), wrap.grobs = TRUE)
+fkbp5 <- grid.grabExpr(plotSignalTracks(bws, p, ensdb, colors=cols, tracks.params = list(ylim=c(0,0.33),transformation=\(x) x, yTicksAt=c(0,0.3), cex.axis=0.55), aggregation="heatmap+mean", genes.params = gp, background.title=NA, cex.title = 0.6), wrap.grobs = TRUE, wrap = TRUE)
+fkbp5b <- grid.grabExpr(plotSignalTracks(bws, p, ensdb, colors=cols, tracks.params = list(ylim=c(0,0.34^2),transformation=\(x) x^2, yTicksAt=c(0,0.1), cex.axis=0.55), aggregation="heatmap+mean", genes.params = gp, background.title=NA, cex.title = 0.6), wrap.grobs = TRUE, wrap = TRUE)
 
 p <- promoters(genes(ensdb, filter=GeneNameFilter("Phyhd1")), 2000, 1000)
 
-Phyhd1 <- grid.grabExpr(plotSignalTracks(bws, p, ensdb, colors=cols, genes.params=gp,  tracks.params = list(ylim=c(0,0.2), yTicksAt=c(0,0.1), cex.axis=0.5), aggregation="heatmap+mean", cex.title=0.6), wrap.grobs=TRUE)
+Phyhd1 <- grid.grabExpr(plotSignalTracks(bws, p, ensdb, colors=cols, genes.params=gp,  tracks.params = list(ylim=c(0,0.2), yTicksAt=c(0,0.1), cex.axis=0.5), aggregation="heatmap+mean", cex.title=0.6), wrap.grobs=TRUE, wrap = TRUE)
 
 
 # p <- promoters(genes(ensdb, filter=GeneNameFilter("Hif3a")), 2000, 1500)
@@ -96,8 +97,9 @@ gvol <- ggplot(d, aes(logFC, -log10(FDR), label=gene)) +
    ggrastr::geom_point_rast(size=0.8, colour="darkgrey") + 
    geom_point(data=d[d$FDR<0.05,], size=0.8, aes(colour=sig)) + 
    ggrepel::geom_text_repel(data=head(d[d$sig,],12), min.segment.length = 0, size=3) + 
-   scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="blue3")) +
-   theme_bw() + theme(legend.position = "none") + coord_cartesian(xlim=c(-1.1,1.1))
+   scale_color_manual(values=TFcols) +
+   mytheme() + theme(legend.position = "none") + coord_cartesian(xlim=c(-1.1,1.1)) +
+  scale_x_continuous(breaks=c(-1,0,1))
 ```
 
 
@@ -143,9 +145,10 @@ ctlab <- data.frame(RNA=c(d1$RNA[1],d2$RNA[2]),
                           paste0("cor=",round(ct2$estimate,2)," (p~",format(ct2$p.value,digits=1),")")))
 
 
-rnacor <- ggplot(m, aes(logFC.rna, logFC.atac, label=Row.names)) + geom_hline(yintercept = 0) + geom_vline(xintercept = 0) +
+rnacor <- ggplot(m, aes(logFC.rna, logFC.atac, label=Row.names)) + 
+  geom_hline(yintercept = 0, colour="darkgrey") + geom_vline(xintercept = 0, colour="darkgrey") +
     geom_point(aes(alpha=-log10(FDR.rna), size=-log10(FDR.atac))) + facet_wrap(~RNA, scales="free_x") + 
-    theme_bw() + ggrepel::geom_text_repel(data=m[m$Row.names %in% gh,], min.segment.length = 0, max.overlaps = 30) +
+    mytheme() + ggrepel::geom_text_repel(data=m[m$Row.names %in% gh,], min.segment.length = 0, max.overlaps = 30) +
     geom_text(data=ctlab, aes(label=lab), x=max(m$logFC.rna), y=min(m$logFC.atac), hjust=1, vjust=0) +
   labs(x="RNA log2(foldchange)", y="ATAC promoter log2(foldchange)") + 
   theme(legend.position = "bottom", legend.title.position = "top")
@@ -164,22 +167,33 @@ d$motif <- row.names(d)
 movol <- ggplot(d, aes(logFC, -log10(FDR), label=motif)) + 
    geom_point(size=0.8, aes(colour=FDR<0.05)) + 
    ggrepel::geom_text_repel(data=head(d[d$FDR<0.05,],12), min.segment.length = 0) + 
-   scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="blue3")) +
-   theme_bw() + theme(legend.position = "none")
+   scale_color_manual(values=TFcols) +
+   mytheme() + theme(legend.position = "none") + xlab("Relative difference")
+
+# moeg <- ggplot(meltSE(dev, c("MEF2D","GCR","JUND")), aes(TimePoint, corrected, fill=Group)) + 
+#   geom_boxplot() + facet_wrap(~feature, scales="free_y") + mytheme(xax = FALSE) +
+#   scale_fill_manual(values=cols) + labs(y="Relative motif accessibility", x=NULL)
 
 moeg <- ggplot(meltSE(dev, c("MEF2D","GCR","JUND")), aes(TimePoint, corrected, fill=Group)) + 
-  geom_boxplot() + facet_wrap(~feature, scales="free_y") + theme_bw() +
-  scale_fill_manual(values=cols) + labs(y="Relative motif accessibility", x=NULL)
+  geom_boxplot() + facet_wrap(~feature, nrow=2, scales="free") + mytheme(xax = FALSE) +
+  scale_fill_manual(values=cols) + labs(y="Relative motif accessibility", x=NULL) +
+  theme(legend.position = c(1, 0),
+        legend.justification = c(1, 0))
 ```
 
-```{r, fig.width=12, fig.height=12}
-pdf("Figure4.pdf", width=12, height=12)
-#png("Figure4.png", width=12, height=12, units = "in", res = 300)
+```{r, fig.width=12, fig.height=14}
+pdf("Figure4.pdf", width=12, height=14, bg="white", version="1.4")
+#png("Figure4.png", width=12, height=14, units = "in", res = 300)
 plot_grid(
-  plot_grid(plot_grid(rvol, hm, nrow=1, scale=0.95, labels="AUTO"),
-            plot_grid(gvol, movol, nrow=1, labels=c("C","E"), scale=0.95), moeg, rnacor, nrow=4, rel_heights=c(1,1,0.7,1.3), labels=c(NA,NA,"F","G"), scale=c(0.95,1,0.95,0.95)),
-  plot_grid(fkbp5b,Phyhd1,nrow=2,labels=c("Fkbp5", "Phyhd1"), scale=0.95, label_x = 0.5),
-  nrow=1, rel_widths = c(5,4), labels=c(NA,"D")
+  plot_grid(NULL, hm, nrow=1, scale=0.95, labels="AUTO", rel_widths = c(5,4)),
+  plot_grid(
+    plot_grid(plot_grid(rvol + ggtitle("Regions"), gvol + ggtitle("Promoters"), nrow=1, scale=0.95, labels=c("C","D")),
+              plot_grid(rnacor, labels="F", scale=0.95),
+              plot_grid(movol, moeg, nrow=1, labels=c("G","H"), scale=0.95, rel_widths = c(3,4)),
+              nrow=3, rel_heights = c(4,5,4)),
+    plot_grid(fkbp5b,Phyhd1,nrow=2,labels=c("Fkbp5", "Phyhd1"), scale=0.95, label_x = 0.5),
+    nrow=1, rel_widths = c(5,4), labels=c(NA,"E")),
+  nrow=2, rel_heights = c(1.8,7)
 )
 dev.off()
 ```

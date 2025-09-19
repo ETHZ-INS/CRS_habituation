@@ -9,7 +9,10 @@ suppressPackageStartupMessages({
   library(patchwork)
   library(ggplot2)
   library(ggrastr)
+  library(cowplot)
+  library(sechm)
 })
+source("../functions/functions.R")
 ```
 
 ```{r, fig.width=15, fig.height=20}
@@ -24,11 +27,11 @@ dea2 <- dplyr::bind_rows(lapply(split(dea, paste(dea$coef,dea$celltype)), FUN=fu
   x <- x[which(x$table.PValue.x<0.05),]
   x[head(order(x$table.PValue.x),5),]
 }))
-(p <- ggplot(dea, aes(table.logFC, -log10(table.FDR.x), colour=table.FDR.x<0.05)) + geom_point_rast(size=1) + 
-  facet_wrap(~celltype+coef, nrow=9, dir="v") + theme_bw() +
-    scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue")) +
-  labs(color="significant", y="-log10(FDR)") + coord_cartesian(xlim=c(-4,4)) +
-    theme(legend.position="bottom"))
+# p <- ggplot(dea, aes(table.logFC, -log10(table.FDR.x), colour=table.FDR.x<0.05)) + geom_point_rast(size=1) + 
+#   facet_wrap(~celltype+coef, nrow=9, dir="v") + theme_bw() +
+#     scale_color_manual(values=c("FALSE"="darkgrey", "TRUE"="darkblue")) +
+#   labs(color="significant", y="-log10(FDR)") + coord_cartesian(xlim=c(-4,4)) +
+#     theme(legend.position="bottom")
 ```
 
 
@@ -41,10 +44,10 @@ mores <- dplyr::bind_rows(list(Neuronal=mores, nonNeuronal=tmp), .id="Class")
 mores$celltype <- gsub("_.+","",mores$B)
 lvls <- unlist(lapply(split(mores$celltype,mores$Class), FUN=function(x) sort(unique(x))))
 mores$celltype <- factor(mores$celltype, lvls)
-mores <- mores[!grepl("Any|Restraint",mores$coef) & !grepl("PVM|CR|Mossy|Ccn2|cycling|vascular|other",mores$celltype),]
+mores <- mores[!grepl(".",mores$coef,fixed=TRUE) & !grepl("PVM|CR|Mossy|Ccn2|cycling|vascular|other",mores$celltype),]
 mores$coef <- as.factor(mores$coef)
-levels(mores$coef) <- gsub("group_id","ARS",levels(mores$coef))
-mores$coef <- factor(mores$coef, c("ARS15min","ARS45min","ARS3h"))
+levels(mores$coef) <- gsub("TreatmentRestraint","CRS.baseline",gsub("group_id","ARS",levels(mores$coef)))
+mores$coef <- factor(mores$coef, c("ARS15min","ARS45min","ARS3h","CRS.baseline"))
 mores2 <- dplyr::bind_rows(lapply(split(mores, paste(mores$coef,mores$celltype)), FUN=function(x){
   x <- x[which(x$adj.P.Val.x<0.05),]
   x[head(order(x$P.Value.x),5),]
@@ -52,32 +55,25 @@ mores2 <- dplyr::bind_rows(lapply(split(mores, paste(mores$coef,mores$celltype))
 mores$significance <- ifelse(mores$adj.P.Val.x<0.05, ifelse(mores$logFC>0,"upregulated","downregulated"),"n.s.")
 mores$significance <- factor(mores$significance, c("upregulated","n.s.","downregulated"))
 
-dl <- split(mores, grepl("^ExN", mores$celltype) + 2*grepl("\\.CA", mores$celltype) + 10*grepl("^InhN", mores$celltype))[c("3","1","10","0")]
+#dl <- split(mores, grepl("^ExN", mores$celltype) + 2*grepl("\\.CA", mores$celltype) + 10*grepl("^InhN", mores$celltype))[c("3","1","10","0")]
+dl <- split(mores, grepl("^ExN", mores$celltype) + 10*grepl("^InhN", mores$celltype))[c("1","10","0")]
 doOneVp <- function(dea, legend=FALSE){
   ggplot(dea, aes(logFC, -log10(adj.P.Val.x), colour=significance)) + geom_point_rast(size=1, raster.dpi = 150) + 
     ggrepel::geom_text_repel(data=mores2[which(mores2$celltype %in% unique(dea$celltype)),,drop=FALSE], 
                              aes(label=rn), size=3, min.segment.length = 0, color="black") +
-    facet_grid(coef~celltype) + theme_bw() +
+    ggh4x::facet_grid2(coef~celltype, axes = TRUE) + theme_bw() + mytheme() +
       scale_color_manual(values=setNames(c("darkred","darkgrey","darkblue"), levels(dea$significance))) +
-    labs(color="significance", y="-log10(FDR)") + scale_y_sqrt(breaks=c(2,5,10)) +
-      theme(legend.position=ifelse(legend,"right","none"), aspect.ratio=5/8)  
+    labs(color="significance", y="-log10(FDR)") + scale_y_sqrt(breaks=c(1,2)) +
+      theme(legend.position=ifelse(legend,"right","none"))  
 }
-pp <- plot_grid(doOneVp(dl[[1]]), doOneVp(dl[[2]], legend = TRUE),
-          doOneVp(dl[[3]]), doOneVp(dl[[4]]), nrow=4)
+pp <- plot_grid(doOneVp(dl[[1]]), doOneVp(dl[[2]], legend = TRUE) + theme(aspect.ratio = 6/10),
+          doOneVp(dl[[3]]) + theme(aspect.ratio = 6/10), nrow=3)
 
-
-
-# (p <- ggplot(mores, aes(logFC, -log10(adj.P.Val.x), colour=significance)) + geom_point_rast(size=1, raster.dpi=200) + 
-#   ggrepel::geom_text_repel(data=mores2, aes(label=rn), size=3, min.segment.length = 0, color="black") +
-#   facet_wrap(~celltype+coef, nrow=9, dir="h") + theme_bw() +
-#     scale_color_manual(values=setNames(c("darkred","darkgrey","darkblue"), levels(mores$significance))) +
-#   labs(color="significant", y="-log10(FDR)") + #coord_cartesian(xlim=c(-4,4)) +
-#     theme(legend.position="bottom"))
-
+pp
 ```
 
 ```{r, fig.width=15, fig.height=20}
-pdf("SXX_snATAC_motifVolcanos.pdf", width=15, height=20)
+pdf("S9_snATAC_motifVolcanos.pdf", width=15, height=20)
 pp
 dev.off()
 ```
