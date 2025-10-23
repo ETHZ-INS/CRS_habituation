@@ -5,7 +5,7 @@ date: "2024-10-27"
 ---
 
 
-```{r}
+```{r setup}
 suppressPackageStartupMessages({
   library(sechm)
   library(ggplot2)
@@ -111,9 +111,7 @@ moact
 
 
 ```{r, fig.width=10, fig.height=7}
-load("../scMultiome/ATAC/motifAcc.RData")
-se1 <- updateSEforPlots(se1, dark=FALSE)
-
+load("../scMultiome/ATAC/motifAcc.RData", verbose=TRUE)
 se1 <- updateSEforPlots(se1, dark=FALSE)
 d <- meltSE(se1, "GCR", rowDat.columns = NA)
 
@@ -164,7 +162,7 @@ pb <- updateSEforPlots(readRDS("../scMultiome/GEX_analysis/neuronal.celltype.PB.
 pbn <- updateSEforPlots(readRDS("../scMultiome/GEX_analysis/nonNeuronal.broad.PB.rds"))
 pbn$celltype <- pbn$broadClass
 se1$celltype <- se1$cluster_id
-se1$Treatment <- paste(se1$Treatment, "+ARS")
+#se1$Treatment <- paste(se1$Treatment, "+ARS")
 se1 <- updateSEforPlots(se1)
 
 d1 <- rbind(cbind(feature="Nr3c1", value=assay(pb, "logcpm")["Nr3c1",], as.data.frame(colData(pb)[,c("TimePoint","Treatment","celltype")])),

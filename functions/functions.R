@@ -252,15 +252,18 @@ mdsTimeProj <- function(se, degs, ref=seq_len(ncol(se))){
   d$lambda <- fit$lambda
   agg <- aggregate(d[ref,c("x","y","rad","lambda")], by=d[ref,c("TimePoint"), drop=FALSE], FUN=median)
   ctl <- ifelse(any(d$Treatment=="Handling"),"Handling","Handling +ARS")
-  p.rad <- p.adjust(sapply(split(d, d$TimePoint), FUN=function(d){
-    wilcox.test(d$rad[which(d$Treatment==ctl)],
-                d$rad[which(d$Treatment!=ctl)])$p.value
-    }))
-  p.lambda <- p.adjust(sapply(split(d, d$TimePoint), FUN=function(d){
+  p <- dplyr::bind_rows(lapply(split(d, d$TimePoint), FUN=function(d){
+    w <- wilcox.test(d$rad[which(d$Treatment==ctl)],
+                d$rad[which(d$Treatment!=ctl)])
+    data.frame(p=w$p.value, W=w$statistic)
+    }), .id="TimePoint")
+  p$FDR <- p.adjust(p$p)
+  p$p.lambda <- p.adjust(sapply(split(d, d$TimePoint), FUN=function(d){
     wilcox.test(d$lambda[which(d$Treatment==ctl)],
                 d$lambda[which(d$Treatment!=ctl)])$p.value
   }))
-  list(d=d, agg=agg, padj.rad=p.rad, padj.lambda=p.lambda)
+  
+  list(d=d, agg=agg, sig=p)
 }
 
 mdsTimePlot <- function(se, degs, hull=TRUE, arrows=TRUE, labels=TRUE, concavity=3){
