@@ -45,10 +45,10 @@ p1 <- p1 + annotate('curve', x=0.05, y=0, yend=tmpx*ag$y[2]/ag$x[2], xend=tmpx,
     linewidth = 1, alpha=0.5, curvature = 0.5, arrow = arrow(length = unit(0.3, 'cm')))
 p1 <- p1 + theme(aspect.ratio=1)
 
-sig <- ifelse(ll$padj.rad<0.001, "***",
-       ifelse(ll$padj.rad<0.01, "**",
-              ifelse(ll$padj.rad<0.05, "*","n.s.")))
-p <- data.frame(TimePoint=names(ll$padj.rad), label=sig)
+sig <- ifelse(ll$sig$FDR<0.001, "***",
+       ifelse(ll$sig$FDR<0.01, "**",
+              ifelse(ll$sig$FDR<0.05, "*","n.s.")))
+p <- data.frame(TimePoint=ll$sig$TimePoint, label=sig)
 levels(ll$d$Treatment) <- gsub(" +","\n +",levels(ll$d$Treatment),fixed=TRUE)
 p2 <- ggplot(ll$d, aes(TimePoint, y=-rad2)) + geom_boxplot(aes(fill=Treatment, color=Treatment)) +
    mytheme() + labs(y="MDS angle (radian)") + 
@@ -57,6 +57,8 @@ crscols <- metadata(se)$anno_colors$Treatment
 names(crscols) <- levels(ll$d$Treatment)
 p2 <- boxplotColors(p2, crscols)
 p1 + p2
+
+paste0("Wilcoxon two-sided test, ", paste(paste0(ll$sig$TimePoint, " W=", ll$sig$W, " p=", format(ll$sig$p, digits=2)), collapse="; "))
 ```
 
 

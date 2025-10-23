@@ -198,6 +198,26 @@ plot_grid(
 dev.off()
 ```
 
+Just the volcanos:
+
+```{r}
+pdf("Figure4_part.pdf", width=12, height=14, bg="white")
+#png("Figure4.png", width=12, height=14, units = "in", res = 300)
+plot_grid(
+  plot_grid(NULL, NULL, nrow=1, scale=0.95, labels="AUTO", rel_widths = c(5,4)),
+  plot_grid(
+    plot_grid(plot_grid(rvol + ggtitle("Regions"), gvol + ggtitle("Promoters"), nrow=1, scale=0.95, labels=c("C","D")),
+              plot_grid(rnacor, labels="F", scale=0.95),
+              plot_grid(movol, moeg, nrow=1, labels=c("G","H"), scale=0.95, rel_widths = c(3,4)),
+              nrow=3, rel_heights = c(4,5,4)),
+    plot_grid(NULL,NULL,nrow=2,labels=c("Fkbp5", "Phyhd1"), scale=0.95, label_x = 0.5),
+    nrow=1, rel_widths = c(5,4), labels=c(NA,"E")),
+  nrow=2, rel_heights = c(1.8,7)
+)
+dev.off()
+
+```
+
 
 
 ```{r,eval=FALSE}

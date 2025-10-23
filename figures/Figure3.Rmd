@@ -32,7 +32,6 @@ vol <- ggplot(d, aes(logFC, -log10(FDR))) + ggrastr::geom_point_rast(size=0.5, c
   scale_x_continuous(breaks=c(-2,0,2), limits=c(-2,2.5)) + 
   scale_y_sqrt(breaks=c(2,15,40), limits=c(0,40)) + labs(color="Significant")
 vol
-
 ```
 
 
@@ -96,6 +95,15 @@ p <- boxplotColors(p, updateSEforPlots(crs)) +
 # p
 # dev.off()
 ```
+
+For stats reporting:
+
+```{r}
+ds <- as.data.frame(coef(summary(mod))[c(4:8),])
+row.names(ds) <- gsub("days CRS","dCRS",gsub("Treatment|group3h | +ARS", "", row.names(ds)))
+paste(paste0(row.names(ds), " b=", round(ds$Estimate,2),"+/-",round(ds$`Std. Error`,2), " t=",round(ds$`t value`,1), " p=", format(ds$`Pr(>|t|)`, digits=2)), collapse="; ")
+```
+
 
 ```{r, fig.width=12, fig.height=4}
 pdf("Figure3.pdf", width=12, height=4)
